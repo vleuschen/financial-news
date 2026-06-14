@@ -376,17 +376,17 @@ def fetch_ai_newsletters(limit=5, keyword=None):
     if keyword: all_items = [it for it in all_items if any(k.lower() in it["title"].lower() for k in keyword.split(",") if k.strip())]
     return all_items[:limit]
 
-def fetch_tldr(limit=3):
+def fetch_tldr(limit=3, keyword=None):
     items = fetch_rss("https://tldr.tech/api/rss/ai", "TLDR AI", limit * 2)
     items = [it for it in items if _within_hours(it.get("time", ""), 48)]
     return items[:limit]
 
-def fetch_import_ai(limit=2):
+def fetch_import_ai(limit=2, keyword=None):
     items = fetch_rss("https://importai.substack.com/feed", "Import AI", limit * 2)
     items = [it for it in items if _within_hours(it.get("time", ""), 168)]
     return items[:limit]
 
-def fetch_aihot(limit=5):
+def fetch_aihot(limit=5, keyword=None):
     items = fetch_rss("https://aihot.virxact.com/rss", "AIHOT", limit * 2)
     items = [it for it in items if _within_hours(it.get("time", ""), 24)]
     return items[:limit]
@@ -418,7 +418,7 @@ PROFILES = {
         "sources": [
             (fetch_hackernews, 6, "AI,LLM,GPT,Claude,Model,Robot,Tech,Apple,Google,Meta,Microsoft,Chip,Startup"),
             (fetch_36kr, 4, "融资,首发,独角兽,创投,科技,AI,人工智能"),
-            (fetch_ai_newsletters, 5, None), (fetch_aihot, 4, None), (fetch_tldr, 3), (fetch_import_ai, 2),
+            (fetch_ai_newsletters, 5, None), (fetch_aihot, 4, None), (fetch_tldr, 3, None), (fetch_import_ai, 2, None),
         ]},
 }
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Daily News Briefing — standalone script for GitHub Actions + Server酱 (ServerChan).
+Daily News Briefing — GitHub Actions + Server酱.
+抓取新闻 → 提取正文 → 翻译中文 → 30字摘要 → 推送微信.
 
 Usage:
-  python news_briefing.py              # 本地测试
-  SERVER_CHAN_KEY=xxx python news_briefing.py --push  # 推送微信
-
-Requirements: pip install requests beautifulsoup4 lxml
+  python news_briefing.py                # 本地测试
+  SERVER_CHAN_KEY=xxx python news_briefing.py --push  # 推送
 """
 
-import io, json, os, re, sys, time
+import io, os, re, sys, time
 import concurrent.futures, urllib.parse, urllib3
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
@@ -25,46 +24,30 @@ if sys.platform == "win32":
         try: s.reconfigure(encoding="utf-8")
         except: pass
 
-# ── Constants ──────────────────────────────────────────────────────────────
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-}
 SERVER_CHAN_URL = os.environ.get("SERVER_CHAN_URL", "https://sctapi.ftqq.com/{key}.send")
+HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"}
 WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
-# 36氪标题前缀垃圾词黑名单 — 开头的统统砍掉
+# ── 36氪 标题垃圾前缀 ─────────────────────────────────────────
 _36KR_PREFIXES = [
     "36氪Auto", "数字时氪", "未来消费", "智能涌现", "未来城市",
     "启动Power on", "36氪出海", "36氪", "新经济IPO", "Meta",
     "风向", "To B产业真探", "硬氪", "新能源",
 ]
 
-
 def clean_title(title, source=""):
-    """清洗标题：砍频道前缀、去导航关键词、去多余空格。"""
-    if not title:
-        return ""
-    t = title.strip()
-    # 砍 36kr 频道前缀
+    t = (title or "").strip()
     if "36氪" in source or "36kr" in source:
         for p in _36KR_PREFIXES:
             if t.startswith(p):
                 t = t[len(p):].strip()
                 break
         t = re.sub(r'^\||\|\s*$', '', t).strip()
-
-    # 去掉开头结尾的垃圾词
     t = re.sub(r'^(首页|\||专题|•|●|·)\s*', '', t).strip()
     t = re.sub(r'\s*\|\s*$', '', t).strip()
-    # 多个空格归一
-    t = re.sub(r'\s+', ' ', t)
-    return t
+    return re.sub(r'\s+', ' ', t).strip()
 
-
-# ── Emoji ──────────────────────────────────────────────────────────────────
-
+# ── Emoji ─────────────────────────────────────────────────────────────
 TOPIC_EMOJIS = [
     (r"ai|llm|gpt|claude|openai|anthropic|模型|人工智能|大模型|fable|mythos|chatgpt|deepseek|agent", "🤖"),
     (r"spacex|space|太空|马斯克|musk|starship|龙飞船|卫星|火箭|nasa|space", "🚀"),
@@ -72,333 +55,180 @@ TOPIC_EMOJIS = [
     (r"google|alphabet|pixel|谷歌|deepmind|gemini|gmail|chrome|android", "🔍"),
     (r"meta|facebook|instagram|whatsapp|threads|扎克伯格|llama", "👓"),
     (r"nvidia|英伟达|gpu|显卡|黄仁勋|cuda|hopper|blackwell|rtx", "🖥️"),
-    (r"microsoft|windows|azure|surface|纳德拉|msft|office|teams|copilot", "🪟"),
+    (r"microsoft|windows|azure|surface|纳德拉|msft|office|copilot", "🪟"),
     (r"github|git|代码|开源|open.source|repository|仓库|commit|pr|developer", "🐙"),
-    (r"创业|融资|创投|独角兽|ipo|天使轮|a轮|b轮|startup|venture|投资机构|vc|pe", "💎"),
-    (r"股票|股市|基金|投资|a股|港股|纳斯达克|道指|标普|沪深|上证|深证|证券|牛市|熊市|散户", "📈"),
-    (r"bitcoin|btc|eth|ethereum|区块链|web3|nft|defi|加密|数字货币|币价|比特币|以太坊", "₿"),
+    (r"创业|融资|创投|独角兽|ipo|天使轮|a轮|b轮|startup|venture|vc|pe", "💎"),
+    (r"股票|股市|基金|投资|a股|港股|纳斯达克|道指|标普|沪深|上证|深证|证券|牛市|熊市", "📈"),
+    (r"bitcoin|btc|eth|ethereum|区块链|web3|nft|加密|数字货币|币价|比特币|以太坊", "₿"),
     (r"芯片|半导体|台积电|tsmc|intel|amd|光刻|晶圆|制程|chip|processor|骁龙|麒麟", "🔬"),
-    (r"数据|隐私|安全|泄露|hack|cyber|黑客|勒索|网络攻击|密码|防火墙|加密", "🔒"),
+    (r"数据|隐私|安全|泄露|hack|cyber|黑客|勒索|网络攻击|密码|防火墙", "🔒"),
     (r"5g|6g|通信|华为|中兴|基站|网络|带宽|光纤|物联网|iot|starlink", "📡"),
-    (r"石油|原油|能源|天然气|gas|新能源|光伏|风电|储能|电池|碳中和|green|氢能", "⛽"),
-    (r"汽车|ev|电车|特斯拉|tesla|比亚迪|byd|蔚来|小鹏|理想|自动驾驶|智驾|新能源车|燃油车", "🚗"),
+    (r"石油|原油|能源|天然气|新能源|光伏|风电|储能|电池|碳中和|green|氢能", "⛽"),
+    (r"汽车|ev|电车|特斯拉|tesla|比亚迪|byd|蔚来|小鹏|理想|自动驾驶|智驾|新能源车", "🚗"),
     (r"机器人|人形|humanoid|机器狗|机械臂|仿生|robotics|automation|宇树", "🦾"),
     (r"quantum|量子|比特|qubit", "⚛️"),
     (r"基因|医疗|药物|疫苗|health|健康|制药|bio|生物|临床试验|手术|诊断", "🧬"),
-    (r"气候|环保|碳排放|全球变暖|厄尔尼诺|极端天气|污染|绿色|可持续|巴黎协定", "🌍"),
-    (r"游戏|gaming|nintendo|sony|playstation|xbox|steam|任天堂|switch|epic|暴雪", "🎮"),
+    (r"气候|环保|碳排放|全球变暖|厄尔尼诺|极端天气|污染|绿色|可持续", "🌍"),
+    (r"游戏|gaming|nintendo|sony|playstation|xbox|steam|任天堂|switch|epic", "🎮"),
     (r"视频|youtube|tiktok|抖音|b站|bilibili|短视频|直播|流媒体|netflix|disney", "🎬"),
-    (r"播客|podcast|lex|fridman|latent.space|这集听了", "🎙️"),
+    (r"播客|podcast|lex|fridman|latent.space", "🎙️"),
     (r"中国|北京|上海|中央|国务院|习近平|两会|央行|政策|监管|法规|发改委|商务部", "🇨🇳"),
     (r"美国|华盛顿|白宫|拜登|trump|特朗普|美联储|fed|硅谷|华尔街|参议院|众议院", "🇺🇸"),
-    (r"俄罗斯|putin|普京|莫斯科|俄乌|俄罗斯|俄军", "🇷🇺"),
-    (r"乌克兰|基辅|泽连斯基|乌军|乌方", "🇺🇦"),
+    (r"俄罗斯|putin|普京|莫斯科|俄乌|俄军", "🇷🇺"),
+    (r"乌克兰|基辅|泽连斯基|乌军", "🇺🇦"),
     (r"欧洲|eu|欧盟|德国|法国|英国|uk|伦敦|巴黎|柏林|脱欧|欧元|欧洲央行", "🇪🇺"),
     (r"日本|tokyo|东京|索尼|丰田|日经|日元|日本央行|软银|三菱", "🇯🇵"),
     (r"韩国|samsung|三星|现代|首尔|韩元|lg|sk", "🇰🇷"),
-    (r"台湾|tsmc|台积电|联发科|富士康|鸿海|台积", "🇹🇼"),
-    (r"香港|hong.kong|恒生|港股|港交所|香港", "🇭🇰"),
-    (r"伊朗|以色列|巴勒斯坦|哈马斯|真主党|霍尔木兹|中东|沙特|石油输出国|opec|胡塞", "🌍"),
+    (r"台湾|tsmc|台积电|联发科|富士康|鸿海", "🇹🇼"),
+    (r"香港|hong.kong|恒生|港股|港交所", "🇭🇰"),
+    (r"伊朗|以色列|巴勒斯坦|哈马斯|真主党|霍尔木兹|中东|沙特|opec|胡塞", "🌍"),
     (r"战争|军事|导弹|制裁|防御|冲突|北约|国防|军队|武器|航母|战机", "⚔️"),
     (r"地震|洪水|台风|灾害|暴雨|飓风|海啸|山火", "🌊"),
     (r"选举|大选|投票|民调|campaign|竞选|连任", "🗳️"),
     (r"教育|学校|高考|gaokao|学生|大学|培训|学位|考研|留学|教材", "📚"),
-    (r"法律|法规|监管|合规|反垄断|罚款|诉讼|立法|政策|判决|法院|仲裁|立案", "⚖️"),
+    (r"法律|法规|监管|合规|反垄断|罚款|诉讼|立法|政策|判决|法院|仲裁", "⚖️"),
     (r"物价|通胀|cpi|ppi|工资|房价|租金|消费|零售|电商|购物|双11|618", "🏷️"),
-    (r"产品|发布|launch|新品|beta|测试版|producthunt|product.hunt|上新", "🆕"),
-    (r"新闻|资讯|报道|日报|周刊|newsletter|tldr|import.ai|aihot|简报", "📨"),
     (r"手机|xiaomi|小米|oppo|vivo|荣耀|honor|oneplus|一加|pixel|samsung", "📱"),
 ]
-
 
 def get_emoji(title, source=""):
     t = f"{title} {source}".lower()
     for pat, emo in TOPIC_EMOJIS:
-        if re.search(pat, t):
-            return emo
+        if re.search(pat, t): return emo
     return "📰"
 
-
-# ── Translation ────────────────────────────────────────────────────────────
-
+# ── 翻译 ─────────────────────────────────────────────────────────────
 _HAS_CN = re.compile(r'[一-鿿㐀-䶿\U00020000-\U0002a6df]')
-# 不要翻译的专有名词（大小写不敏感，自动忽略空格）
-_KEEP_EN = re.compile(
-    r'\b(?:Claude Code|Claude|Codex|Cursor|GitHub Copilot|ChatGPT|Gemini|Perplexity|'
-    r'Midjourney|Stable Diffusion|Sora|Mythos|Fable|Hacker News|Product Hunt|'
-    r'Reddit|SpaceX|Tesla|OpenAI|Anthropic|DeepMind|AlphaFold|'
-    r'Transformer|RAG|LoRA|Agentic|MCP|A2A|AGI|ASI|'
-    r'Llama|Mixtral|Qwen|Bloomberg|Reuters|BBC|CNN|NYT|WSJ|WaPo|'
-    r'PlayStation|Xbox|Nintendo|Spotify|Netflix|Uber|Airbnb|'
-    r'Python|JavaScript|TypeScript|Rust|Kubernetes|Docker|Linux|'
-    r'GitHub|GitLab|BitBucket|npm|PyPI|'
-    r'iPhone|iPad|MacBook|AirPods|Apple Watch|Vision Pro|'
-    r'ChatGPT|Claude|Gemini|Copilot|DALL-E|Sora)\b',
-    re.IGNORECASE
-)
-
 
 def has_chinese(text):
     return bool(_HAS_CN.search(text))
 
-
-def _restore_keep_words(text, keep_map):
-    """Translate后把被翻译了的专有名词恢复回来。"""
-    for orig, placeholder in keep_map.items():
-        text = text.replace(placeholder, orig)
-    return text
-
+KEEP_WORDS = [
+    "Claude Code", "Claude", "Codex", "Cursor", "GitHub Copilot",
+    "ChatGPT", "Gemini", "Perplexity", "Midjourney", "Stable Diffusion",
+    "Sora", "Mythos", "Fable", "Hacker News", "Product Hunt",
+    "Reddit", "SpaceX", "Tesla", "OpenAI", "Anthropic", "DeepMind",
+    "AlphaFold", "Transformer", "RAG", "LoRA", "Agentic", "MCP",
+    "A2A", "AGI", "ASI", "Llama", "Mixtral", "Qwen", "Bloomberg",
+    "Reuters", "BBC", "CNN", "NYT", "WSJ", "WaPo", "PlayStation",
+    "Xbox", "Nintendo", "Spotify", "Netflix", "Uber", "Airbnb",
+    "Python", "JavaScript", "TypeScript", "Rust", "Kubernetes",
+    "Docker", "Linux", "GitHub", "GitLab", "BitBucket", "npm", "PyPI",
+    "iPhone", "iPad", "MacBook", "AirPods", "Apple Watch", "Vision Pro",
+    "DALL-E",
+]
 
 def translate_to_cn(text):
-    """英译中，保持专有名词不翻译。"""
+    """英译中，保护专有名词。单个英文词不翻。"""
     if not text or not text.strip() or has_chinese(text):
         return text
     t = text.strip()
-    # 纯单个英文词（无空格无中文）→ 大概率是专有名词，不翻译
     if ' ' not in t and t.isascii() and len(t) > 1:
         return t
 
-    # 保护专有名词：用 __K0__ __K1__ 等安全占位符，URL编码和翻译都不会破坏
-    keep_map = {}  # placeholder -> original
-    reverse_map = {}  # original -> placeholder
-    for m in _KEEP_EN.finditer(t):
-        orig = m.group(0)
-        if orig in reverse_map:
-            continue  # 已经替换过
-        placeholder = f"__K{len(keep_map)}__"
-        keep_map[placeholder] = orig
-        reverse_map[orig] = placeholder
+    # 专有名词保护
+    kept = {}
+    reverse = {}
+    for w in sorted(KEEP_WORDS, key=len, reverse=True):
+        if w.lower() in t.lower() and w not in reverse:
+            ph = f"\x00K{len(kept)}\x00"
+            kept[ph] = w
+            reverse[w] = ph
+    for orig, ph in reverse.items():
+        # case-insensitive replace
+        t = re.sub(re.escape(orig), ph, t, flags=re.IGNORECASE)
 
-    # 替换原文中的专有名词
-    for orig, placeholder in sorted(reverse_map.items(), key=lambda x: -len(x[0])):
-        t = t.replace(orig, placeholder)
-
-    # 调用 Google Translate
     for attempt in range(3):
         try:
-            url = "https://translate.googleapis.com/translate_a/single"
-            params = {"client": "gtx", "sl": "auto", "tl": "zh-cn", "dt": "t",
-                      "q": t[:3000]}
-            r = requests.get(url, params=params, timeout=15)
+            r = requests.get(
+                "https://translate.googleapis.com/translate_a/single",
+                params={"client": "gtx", "sl": "auto", "tl": "zh-cn",
+                        "dt": "t", "q": t[:3000]},
+                timeout=15
+            )
             r.raise_for_status()
             result = r.json()
             translated = "".join(p[0] for p in result[0] if p[0])
             if translated:
-                # 恢复专有名词
-                for placeholder, orig in keep_map.items():
-                    translated = translated.replace(placeholder, orig)
+                for ph, orig in kept.items():
+                    translated = translated.replace(ph, orig)
                 return translated
             break
         except Exception as e:
             if attempt < 2:
                 time.sleep(1)
                 continue
-            print(f"  ⚠️ 翻译失败: {e}", file=sys.stderr)
-    return text  # fallback
+    return text
 
-
-def batch_translate(texts):
-    """批量翻译，按 <||> 分隔合并发一次请求。"""
-    idxs = [i for i, t in enumerate(texts) if t and not has_chinese(t)]
-    if not idxs:
-        return texts
-    english = [texts[i] for i in idxs]
-    combined = "\n<||>\n".join(english)
-    result = list(texts)
-    translated = translate_to_cn(combined)
-    if translated and translated != combined:
-        parts = translated.split("\n<||>\n")
-        for i, p in zip(idxs, parts):
-            p = p.strip()
-            if p and i < len(result):
-                result[i] = p
-    return result
-
-
-# ── Content Fetching & Summarization ───────────────────────────────────────
-
-
-def fetch_url(url, max_chars=2000):
-    """抓取网页正文，提取干净文本。"""
-    if not url or not url.startswith("http"):
-        return ""
+# ── 正文提取 ───────────────────────────────────────────────────────
+def extract_article(url):
+    """用 trafilatura 提取文章正文。"""
     try:
-        r = requests.get(url, headers=HEADERS, timeout=12)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.content, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header", "aside",
-                         ".sidebar", ".nav", ".menu", ".footer", ".header"]):
-            tag.decompose()
-        # 找 article / main 区域
-        main = soup.find("article") or soup.find("main") or soup.find(".post-content") or soup
-        text = main.get_text(separator=" ", strip=True) if hasattr(main, 'get_text') else soup.get_text(separator=" ", strip=True)
-        text = re.sub(r'\s+', ' ', text).strip()
-        # 过滤纯导航文本
-        nav_words = ["登录", "注册", "搜索", "账号设置", "我的关注", "我的收藏", "退出",
-                     "首页", "关于我们", "联系我们", "广告合作", "免责声明", "用户协议",
-                     "隐私政策", "Copyright", "All rights reserved"]
-        for w in nav_words:
-            text = text.replace(w, "")
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text[:max_chars]
+        import trafilatura
+        downloaded = trafilatura.fetch_url(url, timeout=15)
+        if not downloaded:
+            return ""
+        text = trafilatura.extract(downloaded, include_links=False, include_tables=False)
+        return (text or "")[:1500]
+    except ImportError:
+        # 没有 trafilatura 时的兜底
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=12)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.content, "lxml")
+            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+                tag.decompose()
+            article = soup.find("article") or soup.find("main") or soup.select_one(".post-content") or soup.select_one(".entry-content") or soup
+            p_texts = [p.get_text(strip=True) for p in article.find_all("p") if len(p.get_text(strip=True)) > 30]
+            return " ".join(p_texts)[:1500] if p_texts else ""
+        except:
+            return ""
     except Exception:
         return ""
 
+def _extract_first_paragraph(text):
+    """从正文中提取第一段有意义的文字。"""
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    # 按段落分隔
+    for sep in ["\n\n", "\n\r\n", "\n"]:
+        if sep in text:
+            paragraphs = [p.strip() for p in text.split(sep) if len(p.strip()) > 20]
+            if paragraphs:
+                return paragraphs[0]
+    return text[:300]
 
-# ── Filters ────────────────────────────────────────────────────────────────
-
-_BAD_TITLE_RE = re.compile(
-    r"^(登录|注册|账号|设置|我的关注|我的收藏|退出|首页|"
-    r"搜索|关于我们|联系我们|广告|免责|协议|隐私|"
-    r"Copyright|All rights reserved|This page|404|302|Redirect|"
-    r"Subscribe|Sign in|Sign up|Skip to|Comment|Loader|Save Story)",
-    re.IGNORECASE
-)
-
-# 不是新闻的内容模式
-_NOT_NEWS_RE = re.compile(
-    r"^(%PDF-|%PNG|GIF8|PK\x03\x04|MZ\x90)",  # 二进制文件头
-    re.IGNORECASE
-)
-
-# GitHub 仓库描述不是新闻——纯开源项目列表
-_GITHUB_DESC_RE = re.compile(
-    r"^(A collection of|Collection of|An alternative to|"
-    r"An open.source|Open.source|An opinionated|"
-    r"List of|A list of|The best|Awesome )",
-    re.IGNORECASE
-)
-
-
-def is_good_item(item):
-    """过滤垃圾条目：导航文字、太短、无意义、二进制内容。"""
-    title = item.get("title", "").strip()
-    if not title or len(title) < 5:
-        return False
-    if _BAD_TITLE_RE.match(title):
-        return False
-    if re.match(r'^https?://', title):
-        return False
-    if _NOT_NEWS_RE.match(title):
-        return False
-
-    src = item.get("source", "")
-
-    # GitHub Trending 的仓库描述不算新闻，必须有实质内容
-    if "GitHub" in src:
-        # 纯仓库描述：如 "iptv-org/iptv — Collection of ..."
-        if " — " in title:
-            parts = title.split(" — ", 1)
-            repo_name = parts[0].strip()
-            desc = parts[1].strip()
-            # 如果描述是"Collection of...", "An alternative to..." 这类模板 → 过滤
-            if _GITHUB_DESC_RE.match(desc):
-                return False
-            # 只有仓库名没有实际新闻内容
-            if desc and " " in desc and len(desc) < 15:
-                return False
-        # 纯仓库名（无描述）→ 过滤
-        elif "/" in title and len(title) < 30:
-            return False
-
-    # 产品名单独出现（无上下文）→ Product Hunt 的纯产品名
-    if "Product Hunt" in src and " " not in title and len(title) < 20:
-        return False
-
-    # 中文标题太短而且没有标点说明
-    if has_chinese(title) and len(title) < 8 and "，" not in title and "：" not in title:
-        return False
-
-    return True
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-def filter_keyword(items, kw):
-    if not kw:
-        return items
-    kws = [k.strip() for k in kw.split(",") if k.strip()]
-    if not kws:
-        return items
-    pat = "|".join(re.escape(k) for k in kws)
-    return [it for it in items if re.search(rf'(?i)({pat})', it.get("title", ""))]
-
-
-def filter_hours(items, hours=24):
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    kept = []
-    for it in items:
-        t = it.get("time", "")
-        try:
-            pub = parsedate_to_datetime(str(t))
-            if pub.tzinfo is None:
-                pub = pub.replace(tzinfo=timezone.utc)
-            if pub >= cutoff:
-                kept.append(it)
-        except:
-            kept.append(it)
-    return kept
-
-
-def dedup(items):
-    seen_url, seen_title, result = set(), set(), []
-    for it in items:
-        u, t = it.get("url", "") or "", it.get("title", "") or ""
-        if u and u in seen_url:
-            continue
-        if t and t in seen_title:
-            continue
-        if u:
-            seen_url.add(u)
-        if t:
-            seen_title.add(t)
-        result.append(it)
-    return result
-
-
-# ── RSS Parser ─────────────────────────────────────────────────────────────
-
+# ── RSS ─────────────────────────────────────────────────────────────
 def parse_rss(content, src, limit=10):
     items = []
     try:
-        soup = BeautifulSoup(content, "html.parser")
+        soup = BeautifulSoup(content, "lxml")
         for entry in soup.find_all(["item", "entry"]):
             tag = entry.find("title")
-            if not tag:
-                continue
-            title = tag.get_text(strip=True)
-            if not title:
-                continue
-            title = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', title).strip()
-            if not title:
-                continue
+            if not tag: continue
+            title = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', tag.get_text(strip=True) or "").strip()
+            if not title: continue
             link = ""
             lt = entry.find("link")
             if lt:
-                if lt.has_attr("href"):
-                    link = lt["href"]
-                elif lt.get_text(strip=True):
-                    link = lt.get_text(strip=True)
+                if lt.has_attr("href"): link = lt["href"]
+                elif lt.get_text(strip=True): link = lt.get_text(strip=True)
             if not link:
                 g = entry.find("guid")
-                if g and g.get_text(strip=True).startswith("http"):
-                    link = g.get_text(strip=True)
+                if g and g.get_text(strip=True).startswith("http"): link = g.get_text(strip=True)
             pub = entry.find(["pubdate", "published", "updated", "dc:date"])
             ts = pub.get_text(strip=True) if pub else ""
             desc = entry.find("description") or entry.find("summary")
             summary = ""
             if desc:
-                raw = desc.get_text()
-                raw = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', raw).strip()
-                summary = BeautifulSoup(raw, "html.parser").get_text(separator=" ", strip=True)[:800]
-            items.append({"source": src, "title": title, "url": link,
-                          "time": ts, "summary": summary})
-            if len(items) >= limit:
-                break
+                raw = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', desc.get_text() or "").strip()
+                summary = BeautifulSoup(raw, "lxml").get_text(separator=" ", strip=True)[:1000]
+            items.append({"source": src, "title": title, "url": link, "time": ts, "summary": summary})
+            if len(items) >= limit: break
     except Exception as e:
         print(f"  [RSS] {src}: {e}", file=sys.stderr)
     return items
-
 
 def fetch_rss(url, src, limit=10):
     for a in range(3):
@@ -408,14 +238,11 @@ def fetch_rss(url, src, limit=10):
             r.encoding = r.apparent_encoding or "utf-8"
             return parse_rss(r.content, src, limit)
         except Exception as e:
-            if a < 2:
-                time.sleep(1 + a)
-            else:
-                print(f"  [RSS] {url}: {e}", file=sys.stderr)
+            if a < 2: time.sleep(1 + a)
+            else: print(f"  [RSS] {url}: {e}", file=sys.stderr)
     return []
 
-
-# ── Source Fetchers ────────────────────────────────────────────────────────
+# ── 数据源 ─────────────────────────────────────────────────────────
 
 def fetch_hackernews(limit=5, keyword=None):
     items = []
@@ -424,11 +251,10 @@ def fetch_hackernews(limit=5, keyword=None):
             ts = int(time.time() - 24 * 3600)
             kws = [k.strip() for k in keyword.split(",")]
             quoted = [f'"{k}"' if " " in k else k for k in kws]
-            q = " OR ".join(quoted)
             hits = requests.get(
                 f"https://hn.algolia.com/api/v1/search_by_date"
                 f"?tags=story&numericFilters=created_at_i>{ts}"
-                f"&hitsPerPage={limit * 2}&query={urllib.parse.quote(q)}",
+                f"&hitsPerPage={limit * 2}&query={urllib.parse.quote(' OR '.join(quoted))}",
                 timeout=10).json().get("hits", [])
             if not hits and kws:
                 hits = requests.get(
@@ -438,97 +264,46 @@ def fetch_hackernews(limit=5, keyword=None):
                     timeout=10).json().get("hits", [])
             for h in hits:
                 items.append({"source": "Hacker News",
-                              "title": h.get("title", ""),
-                              "url": h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
-                              "heat": f"{h.get('points', 0)}", "time": "Today"})
-            if items:
-                return items[:limit]
+                    "title": h.get("title", ""),
+                    "url": h.get("url") or f"https://news.ycombinator.com/item?id={h['objectID']}",
+                    "points": h.get("points", 0), "time": "Today"})
+            if items: return items[:limit]
         except Exception as e:
             print(f"  [HN] {e}", file=sys.stderr)
+    # fallback front-page
     try:
-        soup = BeautifulSoup(requests.get("https://news.ycombinator.com/news", headers=HEADERS, timeout=10).text, "html.parser")
+        soup = BeautifulSoup(requests.get("https://news.ycombinator.com/news", headers=HEADERS, timeout=10).text, "lxml")
         for row in soup.select(".athing"):
             tl = row.select_one(".titleline a")
-            if not tl:
-                continue
-            title = tl.get_text()
-            link = tl.get("href")
-            if link and link.startswith("item?id="):
-                link = f"https://news.ycombinator.com/{link}"
-            items.append({"source": "Hacker News", "title": title, "url": link, "heat": "", "time": "Today"})
-        if keyword:
-            items = filter_keyword(items, keyword)
+            if not tl: continue
+            href = tl.get("href", "")
+            items.append({"source": "Hacker News", "title": tl.get_text(),
+                "url": f"https://news.ycombinator.com/{href}" if href.startswith("item?id=") else href,
+                "points": 0, "time": "Today"})
+        if keyword: items = [it for it in items if any(k.lower() in it["title"].lower() for k in keyword.split(",") if k.strip())]
         return items[:limit]
     except Exception as e:
         print(f"  [HN] {e}", file=sys.stderr)
     return items[:limit]
 
-
-def fetch_github(limit=5, keyword=None):
-    items = []
-    try:
-        soup = BeautifulSoup(requests.get("https://github.com/trending", headers=HEADERS, timeout=10).text, "html.parser")
-        for art in soup.select("article.Box-row"):
-            h2 = art.select_one("h2 a")
-            if not h2:
-                continue
-            title = h2.get_text(strip=True).replace("\n", "").replace(" ", "")
-            href = "https://github.com" + h2["href"]
-            desc = art.select_one("p")
-            desc_text = desc.get_text(strip=True) if desc else ""
-            stars = art.select_one('a[href$="/stargazers"]')
-            star_str = stars.get_text(strip=True) if stars else ""
-            items.append({"source": "GitHub Trending",
-                          "title": f"{title} — {desc_text}" if desc_text else title,
-                          "url": href, "heat": f"{star_str} stars", "time": "Today"})
-        if keyword:
-            items = filter_keyword(items, keyword)
-        return items[:limit]
-    except Exception as e:
-        print(f"  [GitHub] {e}", file=sys.stderr)
-    return items[:limit]
-
-
 def fetch_36kr(limit=5, keyword=None):
     items = []
     try:
-        soup = BeautifulSoup(requests.get("https://36kr.com/newsflashes", headers=HEADERS, timeout=10).text, "html.parser")
+        soup = BeautifulSoup(requests.get("https://36kr.com/newsflashes", headers=HEADERS, timeout=10).text, "lxml")
         for el in soup.select(".newsflash-item"):
             te = el.select_one(".item-title")
-            if not te:
-                continue
+            if not te: continue
             title = te.get_text(strip=True)
             href = te.get("href", "")
-            if href and not href.startswith("http"):
-                href = "https://36kr.com" + href
+            if href and not href.startswith("http"): href = "https://36kr.com" + href
             tm = el.select_one(".time")
             ts = tm.get_text(strip=True) if tm else ""
-            items.append({"source": "36氪", "title": title, "url": href, "time": ts, "heat": ""})
-        if keyword:
-            items = filter_keyword(items, keyword)
+            items.append({"source": "36氪", "title": title, "url": href, "time": ts})
+        if keyword: items = [it for it in items if any(k in it["title"] for k in keyword.split(",") if k.strip())]
         return items[:limit]
     except Exception as e:
         print(f"  [36Kr] {e}", file=sys.stderr)
     return items[:limit]
-
-
-def fetch_tencent(limit=5, keyword=None):
-    items = []
-    try:
-        data = requests.get(
-            "https://i.news.qq.com/web_backend/v2/getTagInfo?tagId=aEWqxLtdgmQ%3D",
-            headers={"Referer": "https://news.qq.com/"}, timeout=10).json()
-        for n in data.get("data", {}).get("tabs", [{}])[0].get("articleList", []):
-            items.append({"source": "腾讯新闻", "title": n.get("title", ""),
-                          "url": n.get("url") or n.get("link_info", {}).get("url", ""),
-                          "time": n.get("pub_time", "") or n.get("publish_time", ""), "heat": ""})
-        if keyword:
-            items = filter_keyword(items, keyword)
-        return items[:limit]
-    except Exception as e:
-        print(f"  [QQ] {e}", file=sys.stderr)
-    return items[:limit]
-
 
 def fetch_wallstreetcn(limit=5, keyword=None):
     items = []
@@ -540,26 +315,31 @@ def fetch_wallstreetcn(limit=5, keyword=None):
             res = item.get("resource")
             if res and (res.get("title") or res.get("content_short")):
                 ts = res.get("display_time", 0)
-                time_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""
                 items.append({"source": "华尔街见闻",
-                              "title": res.get("title") or res.get("content_short"),
-                              "url": res.get("uri", ""), "time": time_str, "heat": ""})
-        if keyword:
-            items = filter_keyword(items, keyword)
+                    "title": res.get("title") or res.get("content_short"),
+                    "url": res.get("uri", ""),
+                    "time": datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else ""})
+        if keyword: items = [it for it in items if any(k in it["title"] for k in keyword.split(",") if k.strip())]
         return items[:limit]
     except Exception as e:
         print(f"  [WSCN] {e}", file=sys.stderr)
     return items[:limit]
 
-
-def fetch_producthunt(limit=5, keyword=None):
-    items = fetch_rss("https://www.producthunt.com/feed", "Product Hunt", limit * 2)
-    for it in items:
-        it["heat"] = "Trending"
-    if keyword:
-        items = filter_keyword(items, keyword)
+def fetch_tencent(limit=5, keyword=None):
+    items = []
+    try:
+        data = requests.get(
+            "https://i.news.qq.com/web_backend/v2/getTagInfo?tagId=aEWqxLtdgmQ%3D",
+            headers={"Referer": "https://news.qq.com/"}, timeout=10).json()
+        for n in data.get("data", {}).get("tabs", [{}])[0].get("articleList", []):
+            items.append({"source": "腾讯新闻", "title": n.get("title", ""),
+                "url": n.get("url") or n.get("link_info", {}).get("url", ""),
+                "time": n.get("pub_time", "") or n.get("publish_time", "")})
+        if keyword: items = [it for it in items if any(k in it["title"] for k in keyword.split(",") if k.strip())]
+        return items[:limit]
+    except Exception as e:
+        print(f"  [QQ] {e}", file=sys.stderr)
     return items[:limit]
-
 
 def fetch_weibo(limit=5, keyword=None):
     items = []
@@ -568,21 +348,15 @@ def fetch_weibo(limit=5, keyword=None):
             "User-Agent": HEADERS["User-Agent"], "Referer": "https://weibo.com/"}, timeout=10).json()
         for item in raw.get("data", {}).get("realtime", []):
             title = item.get("note", "") or item.get("word", "")
-            if not title:
-                continue
-            items.append({"source": "微博热搜", "title": title,
-                          "url": f"https://s.weibo.com/weibo?q={urllib.parse.quote(title)}&Refer=top",
-                          "heat": str(item.get("num", 0)), "time": "Real-time"})
-        if keyword:
-            items = filter_keyword(items, keyword)
+            if not title: continue
+            items.append({"source": "微博热搜", "title": title, "heat": str(item.get("num", 0)), "time": "Real-time"})
+        if keyword: items = [it for it in items if any(k in it["title"] for k in keyword.split(",") if k.strip())]
         return items[:limit]
     except Exception as e:
         print(f"  [Weibo] {e}", file=sys.stderr)
     return items[:limit]
 
-
-# ── AI / Newsletter Sources ────────────────────────────────────────────────
-
+# ── AI 简讯源 ────────────────────────────────────────────────────
 AI_FEEDS = [
     ("Interconnects", "https://www.interconnects.ai/feed"),
     ("One Useful Thing", "https://www.oneusefulthing.org/feed"),
@@ -591,12 +365,6 @@ AI_FEEDS = [
     ("AI to ROI", "https://ai2roi.substack.com/feed"),
     ("KDnuggets", "https://www.kdnuggets.com/feed"),
 ]
-PODCAST_FEEDS = [
-    ("Lex Fridman Podcast", "https://lexfridman.com/feed/podcast"),
-    ("80,000 Hours", "https://feeds.transistor.fm/80-000-hours-podcast"),
-    ("Latent Space", "https://latent.space/feed"),
-]
-
 
 def fetch_ai_newsletters(limit=5, keyword=None):
     all_items = []
@@ -605,318 +373,202 @@ def fetch_ai_newsletters(limit=5, keyword=None):
         fs = {ex.submit(fetch_rss, u, n, per): n for n, u in AI_FEEDS}
         for f in concurrent.futures.as_completed(fs):
             all_items.extend(f.result())
-    if keyword:
-        all_items = filter_keyword(all_items, keyword)
+    if keyword: all_items = [it for it in all_items if any(k.lower() in it["title"].lower() for k in keyword.split(",") if k.strip())]
     return all_items[:limit]
 
-
-def fetch_tldr(limit=3, keyword=None):
+def fetch_tldr(limit=3):
     items = fetch_rss("https://tldr.tech/api/rss/ai", "TLDR AI", limit * 2)
-    items = filter_hours(items, 48)
-    if keyword:
-        items = filter_keyword(items, keyword)
+    items = [it for it in items if _within_hours(it.get("time", ""), 48)]
     return items[:limit]
 
-
-def fetch_import_ai(limit=2, keyword=None):
+def fetch_import_ai(limit=2):
     items = fetch_rss("https://importai.substack.com/feed", "Import AI", limit * 2)
-    items = filter_hours(items, 168)
-    if keyword:
-        items = filter_keyword(items, keyword)
+    items = [it for it in items if _within_hours(it.get("time", ""), 168)]
     return items[:limit]
 
-
-def fetch_aihot(limit=5, keyword=None):
+def fetch_aihot(limit=5):
     items = fetch_rss("https://aihot.virxact.com/rss", "AIHOT", limit * 2)
-    items = filter_hours(items, 24)
-    if keyword:
-        items = filter_keyword(items, keyword)
+    items = [it for it in items if _within_hours(it.get("time", ""), 24)]
     return items[:limit]
 
+def _within_hours(time_str, hours):
+    if not time_str: return True
+    try:
+        pub = parsedate_to_datetime(str(time_str))
+        if pub.tzinfo is None: pub = pub.replace(tzinfo=timezone.utc)
+        return pub >= (datetime.now(timezone.utc) - timedelta(hours=hours))
+    except: return True
 
-# ── Profiles ───────────────────────────────────────────────────────────────
-
+# ── Profile ────────────────────────────────────────────────────────
 PROFILES = {
-    "general": {
-        "emoji": "🌅", "name": "综合早报",
+    "general": {"emoji": "🌅", "name": "综合早报",
         "sources": [
-            (fetch_36kr, 8, None),
-            (fetch_wallstreetcn, 5, None),
+            (fetch_36kr, 8, None), (fetch_wallstreetcn, 5, None),
             (fetch_hackernews, 7, "AI,LLM,GPT,Claude,Model,Robot,Tech,Apple,Google,Meta,Tesla,SpaceX"),
-            (fetch_weibo, 3, None),
-            (fetch_ai_newsletters, 4, None),
-            (fetch_aihot, 3, None),
-        ],
-    },
-    "finance": {
-        "emoji": "💰", "name": "财经早报",
+            (fetch_weibo, 3, None), (fetch_ai_newsletters, 4, None), (fetch_aihot, 3, None),
+        ]},
+    "finance": {"emoji": "💰", "name": "财经早报",
         "sources": [
             (fetch_wallstreetcn, 8, None),
             (fetch_36kr, 6, "财报,营收,上市,IPO,投资,基金,股市,经济"),
             (fetch_tencent, 4, "财经,股票,基金,市场,经济,金融"),
             (fetch_hackernews, 4, "Economy,Inflation,Fed,Stock,Finance,Bank,Market,Invest"),
-        ],
-    },
-    "tech": {
-        "emoji": "🤖", "name": "科技早报",
+        ]},
+    "tech": {"emoji": "🤖", "name": "科技早报",
         "sources": [
             (fetch_hackernews, 6, "AI,LLM,GPT,Claude,Model,Robot,Tech,Apple,Google,Meta,Microsoft,Chip,Startup"),
             (fetch_36kr, 4, "融资,首发,独角兽,创投,科技,AI,人工智能"),
-            (fetch_ai_newsletters, 5, None),
-            (fetch_aihot, 4, None),
-            (fetch_tldr, 3, None),
-            (fetch_import_ai, 2, None),
-        ],
-    },
+            (fetch_ai_newsletters, 5, None), (fetch_aihot, 4, None), (fetch_tldr, 3), (fetch_import_ai, 2),
+        ]},
 }
 
+# ── 核心处理 ──────────────────────────────────────────────────────
 
-# ── Pipeline ───────────────────────────────────────────────────────────────
+def dedup(items):
+    seen_url, seen_title, result = set(), set(), []
+    for it in items:
+        u, t = it.get("url", "") or "", it.get("title", "") or ""
+        if u and u in seen_url: continue
+        if t and t in seen_title: continue
+        if u: seen_url.add(u)
+        if t: seen_title.add(t)
+        result.append(it)
+    return result
 
-
-def _clean_summary_text(text):
-    """清洗 RSS 摘要中的常见导航/订阅垃圾文字。"""
-    if not text:
-        return ""
+def _first_good_paragraph(text):
+    """提取正文中第一段有意义的段落（30字以上）。"""
+    if not text: return ""
     text = re.sub(r'\s+', ' ', text).strip()
-    # 去掉常见的 RSS 废话前缀
-    prefixes = [
-        r'^Skip to main content[\.\:\s]*',
-        r'^Search[\.\:\s]*',
-        r'^Sign in[\.\:\s]*',
-        r'^Sign up[\.\:\s]*',
-        r'^Subscribe[\.\:\s]*',
-        r'^Menu[\.\:\s]*',
-        r'^(Home|About|Log in|Login|Register)[\.\:\s]*',
-        r'^Cookie policy[\.\:\s]*',
-        r'^Privacy policy[\.\:\s]*',
-        r'^Share this[\.\:\s]*',
-        r'^Save this story[\.\:\s]*',
-        r'^Comment Loader[\.\:\s]*',
-        r'^Listen to this article[\.\:\s]*',
-        r'^Follow us[\.\:\s]*',
-        r'^Read more[\.\:\s]*',
-    ]
-    for p in prefixes:
-        text = re.sub(p, '', text, flags=re.IGNORECASE).strip()
-
-    # 去掉常见的尾部废话
-    suffixes = [
-        r'\.\s*Subscribe to.*$',
-        r'\.\s*Sign up for.*$',
-        r'\.\s*Read more.*$',
-        r'\.\s*Click to.*$',
-        r'\s*—.*(Subscribe|Sign up).*$',
-        r'\s*\|.*(Subscribe|Sign up).*$',
-        r'\s*All rights reserved.*$',
-        r'\s*Terms of Service.*$',
-    ]
-    for s in suffixes:
-        text = re.sub(s, '.', text, flags=re.IGNORECASE).strip()
-
-    return text
-
-
-def _smart_summary(text, target_len=60):
-    """从文本中提取 30-50 字的中文摘要。
-
-    策略：取完整第一句，如果太长则截断在 60 字左右。
-    """
-    if not text or len(text.strip()) < 8:
-        return ""
-    text = re.sub(r'\s+', ' ', text).strip()
-    # 去掉开头常见的导航文字
-    text = re.sub(
-        r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|'
-        r'Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
-        '', text, flags=re.IGNORECASE
-    ).strip()
-
-    # 按中文标点截第一句
+    # 找段落分隔
+    for sep in ["\n\n", "\n\r\n", "\r\n\r\n"]:
+        if sep in text:
+            for p in text.split(sep):
+                p = p.strip()
+                if len(p) > 25:
+                    return p
+    # 按句号分
     for sep in ["。", "！", "？", "；"]:
         idx = text.find(sep)
-        if 8 < idx < target_len * 2:
-            sentence = text[:idx + 1]
-            if len(sentence) >= 12:
-                return sentence
+        if 10 < idx < 400:
+            return text[:idx+1]
+    return text[:200] if len(text) > 20 else ""
 
-    # 按英文标点截第一句
-    for sep in [". ", "! ", "? "]:
-        idx = text.find(sep)
-        if 8 < idx < target_len * 3:
-            sentence = text[:idx + 1]
-            if len(sentence) >= 12:
-                return sentence
+def _is_bad(text):
+    if not text or len(text) < 10: return True
+    if text.startswith("%PDF"): return True
+    nav_count = sum(1 for m in ["Skip to", "Sign in", "Subscribe", "Cookie", "All rights", "Terms of"] if m.lower() in text.lower())
+    return nav_count >= 2
 
-    # 直接截到 target_len
-    if len(text) > target_len:
-        cut = text.rfind("，", 10, target_len)
-        if cut > 10:
-            return text[:cut + 1]
-        cut = text.rfind(" ", 10, target_len)
-        if cut > 10:
-            return text[:cut] + "…"
-        return text[:target_len] + "…"
-    return text
+def tr(text):
+    """简写翻译，先检查是否需要翻。"""
+    return translate_to_cn(text) if text and not has_chinese(text) else text
 
+def process_item(it):
+    """单条新闻处理：标题翻译 + 正文提取 + 摘要生成。
 
-def _is_garbage(text):
-    """检测是否为PDF/二进制/导航等垃圾内容。"""
-    if not text:
-        return True
-    if not text.strip():
-        return True
-    if text.startswith("%PDF") or text.startswith("%PNG"):
-        return True
-    # 过多的导航关键词 → 垃圾
-    nav = ["Search", "Sign in", "Sign up", "Subscribe",
-           "Skip to main content", "Cookie policy",
-           "All rights reserved", "Terms of Service"]
-    if sum(1 for m in nav if m.lower() in text.lower()) >= 3:
-        return True
-    # 全是英文字母和标点没有空格 → 二进制乱码
-    if text.isascii() and " " not in text and len(text) > 30:
-        return True
-    return False
-
-
-def _strip_hn_prefix(title):
-    """去掉 Hacker News 的 Ask HN / Show HN / Tell HN 等前缀。"""
-    return re.sub(r'^(Ask|Show|Tell|Rate) HN\s*:\s*', '', title, flags=re.IGNORECASE).strip()
-
-
-def _make_news_line(it):
-    """为一条新闻生成一句完整的中文描述（30-50字）。
-
-    核心策略：
-    - 中文源 → 标题就是新闻
-    - AIHOT → 已有中文摘要
-    - AI 简讯 → RSS 描述翻译后取第一句
-    - Hacker News → 只翻标题（HN 标题本身就很完整）
-    - 其他 → 翻标题，不要了也不抓网页
+    返回一句 30-50 字的中文新闻句。
     """
-    title = it.get("title", "")
+    title = clean_title(it.get("title", ""), it.get("source", ""))
     src = it.get("source", "")
-    raw = it.get("summary", "") or ""
+    summary_raw = it.get("summary", "")
+    url = it.get("url", "")
 
-    # 去掉 HN 前缀
-    if src == "Hacker News":
-        title = re.sub(r'^(Ask|Show|Tell|Rate) HN\s*:\s*', '', title, flags=re.IGNORECASE).strip()
-
-    # ── 中文源 → 标题就是完整新闻 ──
+    # ── 中文源：标题就是新闻 ──
     if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
-        return title
+        return tr(title)
 
-    # ── AIHOT → 中文摘要 ──
-    if src == "AIHOT" and has_chinese(raw):
-        return _smart_summary(raw)
+    # ── AIHOT：已有中文摘要 ──
+    if src == "AIHOT" and has_chinese(summary_raw):
+        s = _first_good_paragraph(summary_raw)
+        if s: return s
 
-    # ── Hacker News → 只翻译标题 ──
+    # ── Hacker News：翻译标题 + 尝试抓取正文 ──
     if src == "Hacker News":
-        cn = translate_to_cn(title)
-        return cn if cn and cn != title and len(cn) >= 10 else ""
+        title_cn = tr(title)
+        # 尝试提取文章正文
+        body = extract_article(url) if url and "item?id=" not in url else ""
+        if body and not _is_bad(body):
+            first_p = _first_good_paragraph(body)
+            if first_p:
+                body_cn = tr(first_p[:400])
+                if body_cn:
+                    # 合并标题和正文为一句
+                    merged = f"{title_cn}：{body_cn}"
+                    if len(merged) > 120:
+                        merged = merged[:120] + "…"
+                    return merged
+        return title_cn if len(title_cn) >= 8 else ""
 
-    # ── AI 简讯（Interconnects、One Useful Thing 等） → 翻译描述 ──
-    if src in ("Interconnects", "One Useful Thing", "ChinAI", "Memia",
-               "AI to ROI", "KDnuggets", "TLDR AI", "Import AI"):
-        # 先尝试用 description
-        if raw and not _is_garbage(raw):
-            raw = _clean_summary_text(raw)
-            cn = translate_to_cn(raw[:500])
-            if cn and cn != raw[:500]:
-                s = _smart_summary(cn)
-                if s and len(s) >= 15:
-                    return s
-        # 兜底：翻译标题
-        cn = translate_to_cn(title)
-        if cn and cn != title and len(cn) >= 10:
-            return cn
-        return ""
+    # ── AI 简讯（Interconnects / One Useful Thing / TLDR / Import AI 等） ──
+    if summary_raw and not _is_bad(summary_raw):
+        # RSS 描述可能存在
+        if has_chinese(summary_raw):
+            s = _first_good_paragraph(summary_raw)
+            if s: return s
+        cn = tr(summary_raw[:600])
+        if cn and cn != summary_raw[:600]:
+            s = _first_good_paragraph(cn)
+            if s: return s
 
-    # ── 其他 → 翻译标题 ──
-    if not has_chinese(title):
-        cn = translate_to_cn(title)
-        if cn and cn != title and len(cn) >= 10:
-            return cn
-    return title if len(title) >= 10 else ""
-
+    # 兜底：翻译标题
+    title_cn = tr(title)
+    return title_cn if len(title_cn) >= 8 else ""
 
 def run_profile(key, max_items=15):
     cfg = PROFILES[key]
     all_items = []
-    print(f"  [{cfg['name']}] Fetching {len(cfg['sources'])} sources...", file=sys.stderr)
+    print(f"  [{cfg['name']}] 抓取 {len(cfg['sources'])} 个数据源...", file=sys.stderr)
     with concurrent.futures.ThreadPoolExecutor(10) as ex:
-        fm = {ex.submit(fn, lm, kw): fn.__name__ for fn, lm, kw in cfg["sources"]}
+        fm = {ex.submit(fn, lm, kw if isinstance(kw, (str, type(None))) else None):
+              fn.__name__ for fn, lm, kw in cfg["sources"]}
         for f in concurrent.futures.as_completed(fm):
             try:
                 its = f.result()
                 all_items.extend(its)
-                print(f"    {fm[f]}: {len(its)}", file=sys.stderr)
+                print(f"    {fm[f]}: {len(its)} 条", file=sys.stderr)
             except Exception as e:
-                print(f"    {fm[f]}: ERROR {e}", file=sys.stderr)
-    all_items = [it for it in all_items if is_good_item(it)]
+                print(f"    {fm[f]}: 错误 {e}", file=sys.stderr)
+
     all_items = dedup(all_items)
-    print(f"    → After filter+dedup: {len(all_items)}", file=sys.stderr)
+    print(f"    → 去重后: {len(all_items)} 条", file=sys.stderr)
 
+    results = []
     for it in all_items:
-        it["title"] = clean_title(it["title"], it.get("source", ""))
+        line = process_item(it)
+        if line and len(line) >= 10:
+            results.append((it, line))
 
-    # 生成一句完整中文新闻
-    for it in all_items:
-        title = it["title"]
-        title_clean = _strip_hn_prefix(title)
-        if has_chinese(title_clean):
-            it["title_cn"] = title_clean
-        else:
-            it["title_cn"] = translate_to_cn(title_clean)
+    print(f"    → 合格: {len(results)} 条", file=sys.stderr)
+    return cfg, results[:max_items]
 
-        it["news_line"] = _make_news_line(it)
-
-    # 质量过滤：至少 10 字
-    final = [it for it in all_items
-             if it.get("news_line") and len(it["news_line"]) >= 10]
-    print(f"    → After quality filter: {len(final)}/{len(all_items)}", file=sys.stderr)
-    return cfg, final[:max_items]
-
-
-# ── Format ─────────────────────────────────────────────────────────────────
-
-
+# ── 格式化输出 ───────────────────────────────────────────────────
 def build_briefing():
     now = datetime.now()
     date_str = now.strftime("%Y年%m月%d日")
     weekday = WEEKDAYS[now.weekday()]
 
-    lines = [
-        f"{date_str} {weekday}",
-        "",
-    ]
+    lines = [f"{date_str} {weekday}", ""]
     total = 0
 
     for pk in ["general", "finance", "tech"]:
         cfg, items = run_profile(pk, 15)
         if not items:
             continue
-
         lines.append(f"{cfg['emoji']} **{cfg['name']}** · 共 {len(items)} 条")
         lines.append("")
-        for i, it in enumerate(items, 1):
-            nl = it.get("news_line") or it.get("title_cn") or it.get("title", "")
-            emo = get_emoji(it.get("title_cn") or it.get("title", ""), it.get("source", ""))
+        for i, (it, nl) in enumerate(items, 1):
+            emo = get_emoji(it.get("title", ""), it.get("source", ""))
             lines.append(f"{i}. {emo} {nl}")
             lines.append("")
         total += len(items)
 
     lines.append("─" * 30)
-    lines.append(f"📡 数据源: Hacker News / GitHub / 36氪 / 华尔街见闻 / Product Hunt / 腾讯新闻 / 微博热搜 / AI Newsletters")
+    lines.append(f"📡 数据源: Hacker News / AI Newsletters / 36氪 / 华尔街见闻 / 腾讯新闻 / 微博热搜")
     lines.append(f"🤖 共 {total} 条 · {now.strftime('%H:%M')} 自动生成")
     lines.append("")
     return "\n".join(lines), total
 
-
-# ── Push ───────────────────────────────────────────────────────────────────
-
-
+# ── 推送 ─────────────────────────────────────────────────────────
 def push_combined():
     key = os.environ.get("SERVER_CHAN_KEY", "")
     if not key:
@@ -927,9 +579,9 @@ def push_combined():
     print("📡 抓取中...", file=sys.stderr)
     briefing, n = build_briefing()
     print(f"📊 共 {n} 条", file=sys.stderr)
-    url = SERVER_CHAN_URL.format(key=key)
     try:
-        r = requests.post(url, data={"title": title, "desp": briefing}, timeout=30)
+        r = requests.post(SERVER_CHAN_URL.format(key=key),
+            data={"title": title, "desp": briefing}, timeout=30)
         res = r.json()
         if r.status_code == 200 and res.get("code") == 0:
             print(f"✅ 推送成功: {res.get('message', 'OK')}", file=sys.stderr)
@@ -940,10 +592,7 @@ def push_combined():
         print(f"❌ 推送错误: {e}", file=sys.stderr)
         return False
 
-
-# ── CLI ────────────────────────────────────────────────────────────────────
-
-
+# ── CLI ──────────────────────────────────────────────────────────
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -958,7 +607,6 @@ def main():
         except UnicodeEncodeError:
             print(b.encode("utf-8", errors="replace").decode("utf-8"))
         print(f"\n📊 共 {n} 条", file=sys.stderr)
-
 
 if __name__ == "__main__":
     main()

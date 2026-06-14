@@ -689,33 +689,115 @@ def _fetch_content(items):
         ex.map(_f, to_fetch)
 
 
-def _first_sentence(text):
-    """取第一句有意义的句子。"""
-    if not text:
+def _smart_summary(text, target_len=60):
+    """从文本中提取 30-50 字的中文摘要。
+
+    策略：取完整第一句，如果太长则截断在 60 字左右。
+    """
+    if not text or len(text.strip()) < 8:
         return ""
     text = re.sub(r'\s+', ' ', text).strip()
+    # 去掉开头常见的导航文字
+    text = re.sub(
+        r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|'
+        r'Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
+        '', text, flags=re.IGNORECASE
+    ).strip()
+
+    # 按中文标点截第一句
     for sep in ["。", "！", "？", "；"]:
         idx = text.find(sep)
-        if 10 < idx < 250:
-            return text[:idx + 1]
+        if 8 < idx < target_len * 2:
+            sentence = text[:idx + 1]
+            if len(sentence) >= 12:
+                return sentence
+
+    # 按英文标点截第一句
     for sep in [". ", "! ", "? "]:
         idx = text.find(sep)
-        if 10 < idx < 250:
-            return text[:idx + 1]
-    return text[:120] + ("…" if len(text) > 120 else "")
+        if 8 < idx < target_len * 3:
+            sentence = text[:idx + 1]
+            if len(sentence) >= 12:
+                return sentence
+
+    # 直接截到 target_len
+    if len(text) > target_len:
+        cut = text.rfind("，", 10, target_len)
+        if cut > 10:
+            return text[:cut + 1]
+        cut = text.rfind(" ", 10, target_len)
+        if cut > 10:
+            return text[:cut] + "…"
+        return text[:target_len] + "…"
+    return text
+
+
+def _shorten_title(title, max_chars=40):
+    """GitHub 项目标题太长，简化为可读格式。"""
+    if " — " in title:
+        parts = title.split(" — ", 1)
+        repo = parts[0]
+        desc = parts[1]
+        if len(desc) < 10:
+            return repo
+        return desc[:max_chars] + "…" if len(desc) > max_chars else desc
+    return title
 
 
 def _is_garbage(text):
     """检测是否为PDF/二进制/导航等垃圾内容。"""
     if not text:
         return True
+    if not text.strip():
+        return True
     if text.startswith("%PDF") or text.startswith("%PNG"):
         return True
+    # 过多的导航关键词 → 垃圾
     nav = ["Search", "Sign in", "Sign up", "Subscribe",
            "Skip to main content", "Cookie policy",
            "All rights reserved", "Terms of Service"]
-    count = sum(1 for m in nav if m.lower() in text.lower())
-    return count >= 3
+    if sum(1 for m in nav if m.lower() in text.lower()) >= 3:
+        return True
+    # 全是英文字母和标点没有空格 → 二进制乱码
+    if text.isascii() and " " not in text and len(text) > 30:
+        return True
+    return False
+
+
+def _make_summary(it):
+    """为一条新闻条目生成 30 字左右的摘要。"""
+    title = it.get("title", "")
+    src = it.get("source", "")
+    raw = it.get("summary") or it.get("fetched_content", "")
+
+    # ── 中文快讯源：标题本身就是精炼的新闻 ──
+    if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
+        return _shorten_title(title)
+
+    # ── 已经有中文 summary 的（AIHOT 等） ──
+    if has_chinese(raw) and not _is_garbage(raw):
+        return _smart_summary(raw)
+
+    # ── 英文 summary → 翻译后提取 ──
+    if raw and not _is_garbage(raw):
+        # 先截断，避免翻译太长内容
+        snippet = raw[:500]
+        cn = translate_to_cn(snippet)
+        if cn and cn != snippet:  # 翻译成功
+            # 去掉翻译后可能多出的前缀
+            cn = re.sub(r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
+                        '', cn, flags=re.IGNORECASE).strip()
+            summary = _smart_summary(cn)
+            if summary and len(summary) >= 12:
+                return summary
+
+    # ── 英文标题 → 翻译标题本身作为摘要（兜底） ──
+    if not has_chinese(title):
+        cn_title = translate_to_cn(title)
+        if cn_title and cn_title != title and len(cn_title) >= 10:
+            return _smart_summary(cn_title)
+
+    return ""
 
 
 def run_profile(key, max_items=15):
@@ -738,40 +820,24 @@ def run_profile(key, max_items=15):
     for it in all_items:
         it["title"] = clean_title(it["title"], it.get("source", ""))
 
+    # 补充抓取内容（只对 HN 有效）
     _fetch_content(all_items)
 
+    # 翻译标题 + 生成摘要
     for it in all_items:
         title = it["title"]
-        src = it.get("source", "")
-        raw = it.get("summary") or it.get("fetched_content", "")
-
         if has_chinese(title):
             it["title_cn"] = title
         else:
             it["title_cn"] = translate_to_cn(title)
 
-        # 中文快讯源：标题就是完整新闻
-        if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
-            it["summary_cn"] = title
-            continue
+        it["summary_cn"] = _make_summary(it)
 
-        if _is_garbage(raw):
-            it["summary_cn"] = ""
-            continue
-
-        if has_chinese(raw):
-            it["summary_cn"] = _first_sentence(raw[:400])
-        elif raw:
-            cn = translate_to_cn(raw[:600])
-            it["summary_cn"] = _first_sentence(cn) if cn and cn != raw[:600] else ""
-        else:
-            it["summary_cn"] = ""
-
-    # 过滤无摘要的
+    # 质量过滤：至少 10 字且不是垃圾
     final = [it for it in all_items
-             if it.get("summary_cn") and len(it["summary_cn"]) >= 5
+             if it.get("summary_cn") and len(it["summary_cn"]) >= 10
              and not _is_garbage(it["summary_cn"])]
-    print(f"    → After summary quality filter: {len(final)}", file=sys.stderr)
+    print(f"    → After summary quality filter: {len(final)}/{len(all_items)}", file=sys.stderr)
     return cfg, final[:max_items]
 
 

@@ -732,18 +732,6 @@ def _smart_summary(text, target_len=60):
     return text
 
 
-def _shorten_title(title, max_chars=40):
-    """GitHub 项目标题太长，简化为可读格式。"""
-    if " — " in title:
-        parts = title.split(" — ", 1)
-        repo = parts[0]
-        desc = parts[1]
-        if len(desc) < 10:
-            return repo
-        return desc[:max_chars] + "…" if len(desc) > max_chars else desc
-    return title
-
-
 def _is_garbage(text):
     """检测是否为PDF/二进制/导航等垃圾内容。"""
     if not text:
@@ -764,40 +752,56 @@ def _is_garbage(text):
     return False
 
 
-def _make_summary(it):
-    """为一条新闻条目生成 30 字左右的摘要。"""
+def _strip_hn_prefix(title):
+    """去掉 Hacker News 的 Ask HN / Show HN / Tell HN 等前缀。"""
+    return re.sub(r'^(Ask|Show|Tell|Rate) HN\s*:\s*', '', title, flags=re.IGNORECASE).strip()
+
+
+def _make_news_line(it):
+    """为一条新闻生成一句完整的中文描述（30-50字），如模板格式。
+
+    策略：中文源直接用标题；英文源翻译标题+摘要合并为一句。
+    """
     title = it.get("title", "")
     src = it.get("source", "")
     raw = it.get("summary") or it.get("fetched_content", "")
+    title = _strip_hn_prefix(title)
 
-    # ── 中文快讯源：标题本身就是精炼的新闻 ──
+    # ── 中文快讯源：标题就是完整新闻句 ──
     if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
-        return _shorten_title(title)
+        return title
 
-    # ── 已经有中文 summary 的（AIHOT 等） ──
+    # ── 已有中文描述（AIHOT等） ──
     if has_chinese(raw) and not _is_garbage(raw):
-        return _smart_summary(raw)
+        s = _smart_summary(raw)
+        if s:
+            return s
 
-    # ── 英文 summary → 翻译后提取 ──
-    if raw and not _is_garbage(raw):
-        # 先截断，避免翻译太长内容
-        snippet = raw[:500]
-        cn = translate_to_cn(snippet)
-        if cn and cn != snippet:  # 翻译成功
-            # 去掉翻译后可能多出的前缀
-            cn = re.sub(r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
-                        '', cn, flags=re.IGNORECASE).strip()
-            summary = _smart_summary(cn)
-            if summary and len(summary) >= 12:
-                return summary
+    # ── 英文内容 → 翻译成中文新闻句 ──
+    # 先翻译标题
+    title_cn = translate_to_cn(title) if not has_chinese(title) else title
 
-    # ── 英文标题 → 翻译标题本身作为摘要（兜底） ──
-    if not has_chinese(title):
-        cn_title = translate_to_cn(title)
-        if cn_title and cn_title != title and len(cn_title) >= 10:
-            return _smart_summary(cn_title)
+    # 如果有英文描述，翻译后提取第一句作为补充
+    if raw and not _is_garbage(raw) and len(raw) > 20:
+        cn = translate_to_cn(raw[:600])
+        if cn and cn != raw[:600]:
+            # 清理导航前缀
+            cn = re.sub(
+                r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|'
+                r'Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
+                '', cn, flags=re.IGNORECASE
+            ).strip()
+            detail = _smart_summary(cn)
+            if detail and len(detail) >= 15:
+                # 合并标题+细节为一句
+                merged = f"{title_cn}：{detail}"
+                return merged[:100]
 
-    return ""
+    # 兜底：翻译后的标题
+    if title_cn and title_cn != title and len(title_cn) >= 10:
+        return title_cn
+
+    return title_cn if len(title_cn) > 8 else ""
 
 
 def run_profile(key, max_items=15):
@@ -823,21 +827,21 @@ def run_profile(key, max_items=15):
     # 补充抓取内容（只对 HN 有效）
     _fetch_content(all_items)
 
-    # 翻译标题 + 生成摘要
+    # 翻译标题 + 生成一句完整中文新闻
     for it in all_items:
         title = it["title"]
-        if has_chinese(title):
-            it["title_cn"] = title
+        title_clean = _strip_hn_prefix(title)
+        if has_chinese(title_clean):
+            it["title_cn"] = title_clean
         else:
-            it["title_cn"] = translate_to_cn(title)
+            it["title_cn"] = translate_to_cn(title_clean)
 
-        it["summary_cn"] = _make_summary(it)
+        it["news_line"] = _make_news_line(it)
 
-    # 质量过滤：至少 10 字且不是垃圾
+    # 质量过滤：至少 10 字
     final = [it for it in all_items
-             if it.get("summary_cn") and len(it["summary_cn"]) >= 10
-             and not _is_garbage(it["summary_cn"])]
-    print(f"    → After summary quality filter: {len(final)}/{len(all_items)}", file=sys.stderr)
+             if it.get("news_line") and len(it["news_line"]) >= 10]
+    print(f"    → After quality filter: {len(final)}/{len(all_items)}", file=sys.stderr)
     return cfg, final[:max_items]
 
 
@@ -850,7 +854,6 @@ def build_briefing():
     weekday = WEEKDAYS[now.weekday()]
 
     lines = [
-        f"📬 **每日新闻简报**",
         f"{date_str} {weekday}",
         "",
     ]
@@ -864,13 +867,9 @@ def build_briefing():
         lines.append(f"{cfg['emoji']} **{cfg['name']}** · 共 {len(items)} 条")
         lines.append("")
         for i, it in enumerate(items, 1):
+            nl = it.get("news_line") or it.get("title_cn") or it.get("title", "")
             emo = get_emoji(it.get("title_cn") or it.get("title", ""), it.get("source", ""))
-            tc = it.get("title_cn") or it.get("title", "")
-            sc = it.get("summary_cn", "")
-            lines.append(f"{i}. {emo} {tc}")
-            if sc and sc != tc:
-                lines.append(f"")
-                lines.append(f"   {sc}")
+            lines.append(f"{i}. {emo} {nl}")
             lines.append("")
         total += len(items)
 

@@ -2,8 +2,8 @@
 """
 Daily News Briefing — standalone script for GitHub Actions + Server酱 (ServerChan).
 
-Fetches from 4 profiles (综合/财经/科技/AI深度), caps at 10 items each,
-formats as Chinese markdown, pushes to WeChat via Server酱.
+Fetches from multiple sources, consolidates into 3 categories (综合/财经/科技),
+formats as human-readable Chinese briefing, pushes to WeChat via Server酱.
 
 Usage:
   # Test locally (prints to stdout)
@@ -11,12 +11,6 @@ Usage:
 
   # Push to Server酱
   SERVER_CHAN_KEY=your_key_here python news_briefing.py --push
-
-  # Single profile
-  python news_briefing.py --profile finance
-
-  # Custom Server酱 API endpoint (for alternative implementations)
-  SERVER_CHAN_KEY=xxx SERVER_CHAN_URL=https://others.example.com/send python news_briefing.py --push
 
 Requirements: pip install requests beautifulsoup4 lxml
 """
@@ -66,6 +60,66 @@ SERVER_CHAN_URL = os.environ.get(
     "https://sctapi.ftqq.com/{key}.send"
 )
 
+WEEKDAY_NAMES = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+
+# ── Emoji Helpers ──────────────────────────────────────────────────────────
+
+# Keyword → emoji mapping for news items (checked in order)
+TOPIC_EMOJIS = [
+    (r"ai|llm|gpt|claude|openai|anthropic|模型|人工智能|大模型|fable|mythos", "🤖"),
+    (r"spacex|space|太空|马斯克|musk|starship|龙飞船", "🚀"),
+    (r"apple|iphone|mac|ipad|vision|库克", "🍎"),
+    (r"google|alphabet|pixel|谷歌|deepmind|gemini", "🔍"),
+    (r"meta|facebook|instagram|whatsapp|threads|扎克伯格", "👓"),
+    (r"nvidia|英伟达|gpu|显卡|黄仁勋|cuda|hopper|blackwell", "🖥️"),
+    (r"microsoft|windows|azure|surface|纳德拉|msft", "🪟"),
+    (r"github|git.*hub|代码|开源|open.source|repository|仓库|commit|pr", "🐙"),
+    (r"startup|创业|融资|创投|独角兽|ipo|天使轮|a轮|b轮", "💎"),
+    (r"stock|股市|基金|投资|a股|港股|纳斯达克|道指|标普|沪深|上证|深证", "📈"),
+    (r"crypto|bitcoin|btc|eth|ethereum|区块链|web3|nft|defi|币|加密", "₿"),
+    (r"chip|芯片|半导体|台积电|tsmc|intel|amd|光刻|晶圆|制程", "🔬"),
+    (r"data|数据|隐私|安全|泄露|hack|cyber|网络攻击|勒索", "🔒"),
+    (r"5g|6g|通信|华为|中兴|基站|网络", "📡"),
+    (r"oil|原油|石油|能源|天然气|gas|新能源|光伏|风电|储能|电池", "⛽"),
+    (r"car|ev|电车|特斯拉|tesla|比亚迪|byd|蔚来|小鹏|理想|自动驾驶|智驾", "🚗"),
+    (r"robot|机器人|人形|humanoid|机器狗", "🦾"),
+    (r"quantum|量子|比特", "⚛️"),
+    (r"bio|基因|医疗|药物|疫苗|health|健康|制药", "🧬"),
+    (r"climate|气候|环保|carbon|碳排放|环境|全球变暖|厄尔尼诺", "🌍"),
+    (r"game|游戏|gaming|nintendo|sony|playstation|xbox|steam|任天堂", "🎮"),
+    (r"video|youtube|tiktok|抖音|b站|bilibili|短视频|直播", "🎬"),
+    (r"podcast|播客|lex|fridman|latent.space", "🎙️"),
+    (r"china|中国|北京|上海|中央|国务院|政策|习近平|两会", "🇨🇳"),
+    (r"us|usa|美国|华盛顿|白宫|拜登|trump|特朗普|美联储|fed", "🇺🇸"),
+    (r"russia|俄罗斯|putin|普京|莫斯科", "🇷🇺"),
+    (r"ukraine|乌克兰|基辅|泽连斯基", "🇺🇦"),
+    (r"europe|eu|欧盟|欧洲|德国|法国|英国|uk|伦敦|巴黎|柏林", "🇪🇺"),
+    (r"japan|日本|tokyo|东京|索尼|丰田", "🇯🇵"),
+    (r"korea|韩国|samsung|三星|现代|首尔", "🇰🇷"),
+    (r"taiwan|tsmc|台积电|台湾|联发科", "🇹🇼"),
+    (r"hong.kong|香港", "🇭🇰"),
+    (r"middle.east|伊朗|以色列|巴勒斯坦|哈马斯|真主党|霍尔木兹|美伊|黎巴嫩", "🌍"),
+    (r"war|战争|军事|导弹|制裁|防御|冲突", "⚔️"),
+    (r"earthquake|地震|洪水|台风|灾害|暴雨", "🌊"),
+    (r"election|选举|大选|投票|民调", "🗳️"),
+    (r"education|教育|学校|高考|gaokao|学生|大学", "📚"),
+    (r"law|法规|监管|合规|反垄断|罚款|诉讼|立法|政策|regulation|ban|禁止", "⚖️"),
+    (r"space|nasa|卫星|火箭|发射|space", "🌌"),
+    (r"price|涨价|降价|通胀|cpi|ppi|物价|工资|inflation", "🏷️"),
+    (r"product.hunt|producthunt|新产品|发布|launch", "🆕"),
+    (r"tldr|import.ai|aihot|newsletter|资讯|简报|日报|周刊", "📨"),
+]
+
+
+def get_topic_emoji(title, source=""):
+    """Match a news item to its best emoji based on title and source."""
+    text = f"{title} {source}".lower()
+    for pattern, emoji in TOPIC_EMOJIS:
+        if re.search(pattern, text):
+            return emoji
+    return "📰"
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -106,23 +160,24 @@ def filter_by_hours(items, hours=24):
     return kept
 
 
-def fetch_url_text(url, max_chars=1500):
-    """Fetch a URL and extract readable text (first max_chars chars)."""
-    if not url or not url.startswith("http"):
-        return ""
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=8)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.content, "html.parser")
-        for tag in soup(["script", "style", "nav", "footer", "header"]):
-            tag.decompose()
-        text = soup.get_text(separator=" ", strip=True)
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = " ".join(c for c in chunks if c)
-        return text[:max_chars]
-    except Exception:
-        return ""
+def deduplicate(items):
+    """Remove duplicates by URL then by title."""
+    seen_url = set()
+    seen_title = set()
+    result = []
+    for item in items:
+        url = item.get("url", "") or ""
+        title = item.get("title", "") or ""
+        if url and url in seen_url:
+            continue
+        if title and title in seen_title:
+            continue
+        if url:
+            seen_url.add(url)
+        if title:
+            seen_title.add(title)
+        result.append(item)
+    return result
 
 
 # ── RSS Parser ─────────────────────────────────────────────────────────────
@@ -203,7 +258,6 @@ def fetch_hackernews(limit=5, keyword=None):
     """Hacker News via Algolia API (keyword) + front-page scrape fallback."""
     items = []
 
-    # Try Algolia API first
     if keyword:
         try:
             ts = int(time.time() - 24 * 3600)
@@ -219,7 +273,6 @@ def fetch_hackernews(limit=5, keyword=None):
             hits = data.get("hits", [])
 
             if not hits and kws:
-                # Fallback: just first keyword
                 url2 = (
                     f"https://hn.algolia.com/api/v1/search_by_date"
                     f"?tags=story&numericFilters=created_at_i>{ts}"
@@ -390,27 +443,6 @@ def fetch_producthunt(limit=5, keyword=None):
     return items[:limit]
 
 
-def fetch_v2ex(limit=5, keyword=None):
-    """V2EX 热门话题."""
-    items = []
-    try:
-        data = requests.get("https://www.v2ex.com/api/topics/hot.json", headers=HEADERS, timeout=10).json()
-        for t in data:
-            items.append({
-                "source": "V2EX",
-                "title": t.get("title", ""),
-                "url": t.get("url", ""),
-                "heat": f"{t.get('replies', 0)} 回复",
-                "time": "Hot",
-            })
-        if keyword:
-            items = filter_keywords(items, keyword)
-        return items[:limit]
-    except Exception as e:
-        print(f"  [V2EX] {e}", file=sys.stderr)
-    return items[:limit]
-
-
 def fetch_weibo(limit=5, keyword=None):
     """微博热搜."""
     items = []
@@ -444,16 +476,16 @@ def fetch_weibo(limit=5, keyword=None):
 # ── RSS-based Aggregate Sources ────────────────────────────────────────────
 
 AI_NEWSLETTER_FEEDS = [
-    ("Interconnects", "https://www.interconnects.ai/feed"),
-    ("One Useful Thing", "https://www.oneusefulthing.org/feed"),
-    ("ChinAI", "https://chinai.substack.com/feed"),
-    ("Memia", "https://memia.substack.com/feed"),
+    ("Interconnects (Nathan Lambert)", "https://www.interconnects.ai/feed"),
+    ("One Useful Thing (Ethan Mollick)", "https://www.oneusefulthing.org/feed"),
+    ("ChinAI (Jeffrey Ding)", "https://chinai.substack.com/feed"),
+    ("Memia (Ben Reid)", "https://memia.substack.com/feed"),
     ("AI to ROI", "https://ai2roi.substack.com/feed"),
     ("KDnuggets", "https://www.kdnuggets.com/feed"),
 ]
 
 PODCAST_FEEDS = [
-    ("Lex Fridman", "https://lexfridman.com/feed/podcast"),
+    ("Lex Fridman Podcast", "https://lexfridman.com/feed/podcast"),
     ("80,000 Hours", "https://feeds.transistor.fm/80-000-hours-podcast"),
     ("Latent Space", "https://latent.space/feed"),
 ]
@@ -513,56 +545,52 @@ def fetch_aihot(limit=5, keyword=None):
 
 
 # ── Profile Definitions ────────────────────────────────────────────────────
-# Each profile: list of (fetcher_func, fetch_limit, keyword_or_None)
-# Total output capped at 10 items per profile.
 
 PROFILES = {
     "general": {
         "emoji": "🌅",
         "name": "综合早报",
         "sources": [
-            (fetch_hackernews, 3, None),
-            (fetch_36kr, 2, None),
-            (fetch_github_trending, 2, None),
-            (fetch_wallstreetcn, 2, None),
-            (fetch_producthunt, 1, None),
+            (fetch_hackernews, 6, None),
+            (fetch_36kr, 4, None),
+            (fetch_github_trending, 3, None),
+            (fetch_wallstreetcn, 3, None),
+            (fetch_producthunt, 2, None),
+            (fetch_weibo, 2, None),
         ],
     },
     "finance": {
         "emoji": "💰",
         "name": "财经早报",
         "sources": [
-            (fetch_wallstreetcn, 4, None),
-            (fetch_36kr, 2, "财报,营收,上市,IPO,投资"),
-            (fetch_tencent, 2, "财经,股票,基金,市场"),
-            (fetch_hackernews, 2, "Economy,Inflation,Fed,Stock,Finance"),
+            (fetch_wallstreetcn, 8, None),
+            (fetch_36kr, 4, "财报,营收,上市,IPO,投资,基金,股市"),
+            (fetch_tencent, 3, "财经,股票,基金,市场,经济"),
+            (fetch_hackernews, 3, "Economy,Inflation,Fed,Stock,Finance,Bank,Market"),
         ],
     },
     "tech": {
         "emoji": "🤖",
         "name": "科技早报",
         "sources": [
-            (fetch_hackernews, 4, "AI,LLM,Transformer,Model,Robot,Startup"),
-            (fetch_github_trending, 3, None),
-            (fetch_producthunt, 2, "Developer Tools,Coding,API,AI"),
-            (fetch_36kr, 1, "融资,首发,独角兽,创投"),
-        ],
-    },
-    "ai_daily": {
-        "emoji": "🧠",
-        "name": "AI 深度日报",
-        "sources": [
+            (fetch_hackernews, 5, "AI,LLM,GPT,Claude,Model,Robot,Startup,Tech,Apple,Google,Meta,Microsoft"),
+            (fetch_github_trending, 4, None),
+            (fetch_producthunt, 3, "Developer Tools,Coding,API,AI,Tech"),
+            (fetch_36kr, 2, "融资,首发,独角兽,创投,科技"),
             (fetch_ai_newsletters, 4, None),
+            (fetch_aihot, 3, None),
             (fetch_tldr_ai, 3, None),
-            (fetch_aihot, 2, None),
             (fetch_import_ai, 1, None),
         ],
     },
 }
 
 
-def run_profile(profile_key):
-    """Execute a single profile and return (profile_info, items)."""
+# ── Fetch & Format ─────────────────────────────────────────────────────────
+
+
+def run_profile(profile_key, max_items=15):
+    """Execute a single profile and return (profile_info, deduplicated items)."""
     cfg = PROFILES[profile_key]
     all_items = []
 
@@ -582,91 +610,104 @@ def run_profile(profile_key):
             except Exception as e:
                 print(f"    {future_map[f]}: ERROR {e}", file=sys.stderr)
 
-    # Deduplicate
-    seen = set()
-    deduped = []
-    for item in all_items:
-        key = item.get("url", "") or item.get("title", "")
-        if key and key not in seen:
-            seen.add(key)
-            deduped.append(item)
-
-    # Cap at 10
-    return cfg, deduped[:10]
+    deduped = deduplicate(all_items)
+    print(f"    → Total: {len(all_items)}, After dedup: {len(deduped)}", file=sys.stderr)
+    return cfg, deduped[:max_items]
 
 
-def format_item(idx, item):
-    """Format a single news item as markdown."""
+def format_news_item(idx, item):
+    """Format a single news item in clean WeChat-friendly style."""
     title = item.get("title", "Untitled")
     url = item.get("url", "")
     source = item.get("source", "")
     heat = item.get("heat", "")
     time_str = item.get("time", "")
-    summary = item.get("summary", "")
 
-    parts = [f"**{idx}.** [{title}]({url})"]
+    # Pick emoji
+    emoji = get_topic_emoji(title, source)
 
+    # Build line 1: number + emoji + title
+    lines = [f"{idx}. {emoji} {title}"]
+
+    # Build line 2: source tag + metadata
     meta_parts = []
     if source:
         meta_parts.append(f"📰 {source}")
-    if time_str:
-        meta_parts.append(f"🕐 {time_str}")
     if heat:
-        meta_parts.append(f"🔥 {heat}")
+        heat_clean = re.sub(r"\s+points$", "", heat)
+        heat_clean = re.sub(r"\s+stars$", "⭐", heat_clean)
+        meta_parts.append(f"🔥 {heat_clean}")
+    if time_str and time_str not in ("Today", "Real-time", "Hot", ""):
+        # Normalize time formatting
+        t = time_str
+        try:
+            parsed = parsedate_to_datetime(str(t))
+            local = parsed.replace(tzinfo=timezone.utc).astimezone()
+            t = local.strftime("%m-%d %H:%M")
+        except Exception:
+            # Fallback: just take first 10 chars if it's a date string
+            if len(t) > 16:
+                t = t[:10]
+        meta_parts.append(f"🕐 {t}")
 
     if meta_parts:
-        parts.append(f"> `{' | '.join(meta_parts)}`")
+        lines.append(f"   {' '.join(meta_parts)}")
 
-    if summary:
-        # Truncate long summaries
-        s = summary[:200] + "..." if len(summary) > 200 else summary
-        parts.append(f"> {s}")
+    # Line 3: URL
+    if url:
+        lines.append(f"   🔗 {url}")
 
-    return "\n".join(parts)
-
-
-def format_briefing(profile_key):
-    """Run a profile and format as markdown section."""
-    cfg, items = run_profile(profile_key)
-
-    if not items:
-        return f"{cfg['emoji']} **{cfg['name']}**\n\n_暂无数据_\n\n"
-
-    lines = [f"{cfg['emoji']} **{cfg['name']}** ({len(items)} 条)"]
-    for i, item in enumerate(items, 1):
-        lines.append("")
-        lines.append(format_item(i, item))
-    lines.append("")
     return "\n".join(lines)
 
 
-def generate_full_briefing(profiles=None):
-    """Run all specified profiles and generate a complete markdown briefing."""
-    if profiles is None:
-        profiles = list(PROFILES.keys())
+def format_section_header(cfg, count):
+    """Format a section header with title and item count."""
+    emoji = cfg["emoji"]
+    name = cfg["name"]
+    return f"{emoji} **{name}** · 共 {count} 条" + "\n" + "─" * 30
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    parts = [
-        f"# 📬 每日新闻简报 | {now}",
-        "",
-    ]
 
-    all_items_count = 0
-    for pk in profiles:
-        if pk not in PROFILES:
+def generate_combined_briefing():
+    """Fetch all profiles and generate a single consolidated briefing."""
+    now = datetime.now()
+    date_str = now.strftime("%Y年%m月%d日")
+    weekday = WEEKDAY_NAMES[now.weekday()]
+
+    header = (
+        f"📬 **每日新闻简报**\n"
+        f"{date_str} {weekday}\n"
+    )
+
+    # Fetch all profiles
+    sections = []
+    total_count = 0
+
+    profile_keys = ["general", "finance", "tech"]
+    for pk in profile_keys:
+        cfg, items = run_profile(pk, max_items=15)
+        if not items:
             continue
-        section = format_briefing(pk)
-        parts.append(section)
-        # Count items
-        for line in section.split("\n"):
-            m = re.match(r".*\*\*(\d+)\.\*\*", line)
-            if m:
-                all_items_count += 1
 
-    parts.append("---")
-    parts.append(f"*共 {all_items_count} 条 · 由 News Briefing Bot 自动生成*")
+        lines = [""]
+        lines.append(format_section_header(cfg, len(items)))
+        lines.append("")
+        for i, item in enumerate(items, 1):
+            lines.append(format_news_item(i, item))
+            lines.append("")
 
-    return "\n".join(parts)
+        sections.append("\n".join(lines))
+        total_count += len(items)
+
+    # Footer
+    now_str = now.strftime("%m-%d %H:%M")
+    footer = (
+        f"───\n"
+        f"📡 数据源: Hacker News / GitHub Trending / 36氪 / 华尔街见闻 "
+        f"/ Product Hunt / 腾讯新闻 / 微博热搜 / AI Newsletters\n"
+        f"🤖 由 News Briefing Bot 于 {now_str} 自动生成"
+    )
+
+    return header + "".join(sections) + "\n" + footer, total_count
 
 
 def push_to_serverchan(key, title, content):
@@ -689,41 +730,23 @@ def push_to_serverchan(key, title, content):
         return False
 
 
-def push_multi_profile(profiles):
-    """Push each profile as a separate Server酱 message (better for WeChat reading)."""
+def push_combined():
+    """Fetch all profiles and push ONE combined message to Server酱."""
     key = os.environ.get("SERVER_CHAN_KEY", "")
     if not key:
         print("❌ SERVER_CHAN_KEY not set", file=sys.stderr)
         return False
 
-    success = True
-    now = datetime.now().strftime("%m/%d %H:%M")
+    now = datetime.now()
+    title = now.strftime("📬 每日新闻简报 | %Y年%m月%d日")
 
-    for pk in profiles:
-        if pk not in PROFILES:
-            continue
-        cfg = PROFILES[pk]
-        section = format_briefing(pk)
-        title = f"{cfg['emoji']} {cfg['name']} | {now}"
+    print("📡 Fetching all profiles...", file=sys.stderr)
+    briefing, total_count = generate_combined_briefing()
 
-        print(f"  Pushing {cfg['name']}...", file=sys.stderr)
-        if not push_to_serverchan(key, title, section):
-            success = False
+    print(f"📊 Total items: {total_count}", file=sys.stderr)
+    print(f"📤 Pushing to Server酱...", file=sys.stderr)
 
-    # Also send a summary digest
-    summary_lines = [f"📬 简报已送达 | {now}", ""]
-    for pk in profiles:
-        if pk not in PROFILES:
-            continue
-        cfg = PROFILES[pk]
-        # count items from a quick run
-        _, items = run_profile(pk)
-        summary_lines.append(f"{cfg['emoji']} {cfg['name']}: {len(items)} 条")
-
-    summary = "\n".join(summary_lines)
-    push_to_serverchan(key, f"📬 简报汇总 | {now}", summary)
-
-    return success
+    return push_to_serverchan(key, title, briefing)
 
 
 # ── CLI Entry Point ────────────────────────────────────────────────────────
@@ -735,7 +758,7 @@ def main():
     parser.add_argument(
         "--profile", "-p",
         default="all",
-        help="Profile(s): general,finance,tech,ai_daily or 'all' (default: all)"
+        help="Profile(s): general,finance,tech or 'all' (default: all)"
     )
     parser.add_argument(
         "--push", action="store_true",
@@ -743,24 +766,13 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.profile == "all":
-        profiles = list(PROFILES.keys())
-    else:
-        profiles = [p.strip() for p in args.profile.split(",") if p.strip() in PROFILES]
-
-    if not profiles:
-        print("❌ No valid profiles specified.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"🔍 Profiles: {', '.join(profiles)}", file=sys.stderr)
-    print(f"📤 Push mode: {'ON' if args.push else 'OFF'}", file=sys.stderr)
-
     if args.push:
-        push_multi_profile(profiles)
+        success = push_combined()
+        sys.exit(0 if success else 1)
     else:
-        # Generate full combined briefing to stdout
-        briefing = generate_full_briefing(profiles)
+        briefing, total_count = generate_combined_briefing()
         print(briefing)
+        print(f"\n📊 共 {total_count} 条新闻", file=sys.stderr)
 
 
 if __name__ == "__main__":

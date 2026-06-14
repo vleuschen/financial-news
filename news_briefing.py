@@ -123,20 +123,19 @@ def translate_to_cn(text):
     if not text or not text.strip() or has_chinese(text):
         return text
     t = text.strip()
+    # 单个英文词→不翻
     if ' ' not in t and t.isascii() and len(t) > 1:
         return t
 
-    # 专有名词保护
+    # 专有名词保护：用 @@K0@@ @@K1@@ 之类安全占位符
     kept = {}
-    reverse = {}
-    for w in sorted(KEEP_WORDS, key=len, reverse=True):
-        if w.lower() in t.lower() and w not in reverse:
-            ph = f"\x00K{len(kept)}\x00"
+    ordered = sorted(KEEP_WORDS, key=len, reverse=True)
+    for i, w in enumerate(ordered):
+        if w.lower() in t.lower():
+            ph = f"@@K{i}@@"
             kept[ph] = w
-            reverse[w] = ph
-    for orig, ph in reverse.items():
-        # case-insensitive replace
-        t = re.sub(re.escape(orig), ph, t, flags=re.IGNORECASE)
+            # 大小写不敏感替换
+            t = re.sub(re.escape(w), ph, t, flags=re.IGNORECASE)
 
     for attempt in range(3):
         try:
@@ -161,43 +160,28 @@ def translate_to_cn(text):
     return text
 
 # ── 正文提取 ───────────────────────────────────────────────────────
-def extract_article(url):
-    """用 trafilatura 提取文章正文。"""
+def _try_extract(url):
+    """尝试提取文章正文。失败返回空字符串，不抛异常。"""
+    if not url or "item?id=" in url:
+        return ""
     try:
         import trafilatura
-        downloaded = trafilatura.fetch_url(url, timeout=15)
+        downloaded = trafilatura.fetch_url(url, timeout=12)
         if not downloaded:
             return ""
-        text = trafilatura.extract(downloaded, include_links=False, include_tables=False)
-        return (text or "")[:1500]
-    except ImportError:
-        # 没有 trafilatura 时的兜底
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=12)
-            r.raise_for_status()
-            soup = BeautifulSoup(r.content, "lxml")
-            for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
-                tag.decompose()
-            article = soup.find("article") or soup.find("main") or soup.select_one(".post-content") or soup.select_one(".entry-content") or soup
-            p_texts = [p.get_text(strip=True) for p in article.find_all("p") if len(p.get_text(strip=True)) > 30]
-            return " ".join(p_texts)[:1500] if p_texts else ""
-        except:
+        text = trafilatura.extract(downloaded, include_links=False, include_tables=False) or ""
+        text = text.strip()
+        if len(text) < 50:
             return ""
+        # 取第一段
+        for sep in ["\n\n", "\n\r\n", "\r\n\r\n", "\n"]:
+            if sep in text:
+                first_p = [p.strip() for p in text.split(sep) if len(p.strip()) > 30]
+                if first_p:
+                    return first_p[0][:500]
+        return text[:500]
     except Exception:
         return ""
-
-def _extract_first_paragraph(text):
-    """从正文中提取第一段有意义的文字。"""
-    if not text:
-        return ""
-    text = re.sub(r'\s+', ' ', text).strip()
-    # 按段落分隔
-    for sep in ["\n\n", "\n\r\n", "\n"]:
-        if sep in text:
-            paragraphs = [p.strip() for p in text.split(sep) if len(p.strip()) > 20]
-            if paragraphs:
-                return paragraphs[0]
-    return text[:300]
 
 # ── RSS ─────────────────────────────────────────────────────────────
 def parse_rss(content, src, limit=10):
@@ -482,22 +466,20 @@ def process_item(it):
         s = _first_good_paragraph(summary_raw)
         if s: return s
 
-    # ── Hacker News：翻译标题 + 尝试抓取正文 ──
+    # ── Hacker News：翻译标题。尝试提取正文，不行就用标题 ──
     if src == "Hacker News":
         title_cn = tr(title)
-        # 尝试提取文章正文
-        body = extract_article(url) if url and "item?id=" not in url else ""
-        if body and not _is_bad(body):
-            first_p = _first_good_paragraph(body)
-            if first_p:
-                body_cn = tr(first_p[:400])
-                if body_cn:
-                    # 合并标题和正文为一句
-                    merged = f"{title_cn}：{body_cn}"
-                    if len(merged) > 120:
-                        merged = merged[:120] + "…"
-                    return merged
-        return title_cn if len(title_cn) >= 8 else ""
+        if not title_cn or len(title_cn) < 8:
+            return ""
+        # 尝试提取正文（失败了就用标题，不勉强）
+        body = _try_extract(url)
+        if body:
+            body_cn = tr(body[:400])
+            if body_cn and len(body_cn) > 20:
+                # 标题 + 正文第一句
+                merged = f"{title_cn}：{body_cn}"
+                return merged[:120]
+        return title_cn
 
     # ── AI 简讯（Interconnects / One Useful Thing / TLDR / Import AI 等） ──
     if summary_raw and not _is_bad(summary_raw):

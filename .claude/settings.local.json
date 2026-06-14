@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "PowerShell(python --version)",
+      "PowerShell(pip *)",
+      "PowerShell($env:HTTP_PROXY; $env:HTTPS_PROXY; $env:http_proxy; $env:https_proxy; $env:NO_PROXY; $env:no_proxy)",
+      "PowerShell(curl -s -o $null -w \"%{http_code}\" https://pypi.org/simple/requests/ 2>&1; echo \"`n---\"; curl -s -o $null -w \"%{http_code}\" https://mirrors.aliyun.com/pypi/simple/ 2>&1)",
+      "PowerShell(python -c \"import requests; print\\('requests:', requests.__version__\\)\" 2>&1; python -c \"import bs4; print\\('bs4:', bs4.__version__\\)\" 2>&1)",
+      "PowerShell(Test-NetConnection *)",
+      "PowerShell(Get-ChildItem Env: | Where-Object { $_.Name -match \"proxy|PROXY\" } | Format-Table Name, Value)",
+      "PowerShell(Set-ItemProperty *)",
+      "PowerShell(python -c \"import requests; print\\('requests:', requests.__version__\\)\" 2>&1; python -c \"import bs4; print\\('bs4:', bs4.__version__\\)\" 2>&1; python -c \"import feedparser; print\\('feedparser:', feedparser.__version__\\)\" 2>&1; python -c \"import lxml; print\\('lxml:', lxml.__version__\\)\" 2>&1)",
+      "PowerShell(echo \"HTTP_PROXY=$env:HTTP_PROXY\"; echo \"HTTPS_PROXY=$env:HTTPS_PROXY\"; echo \"http_proxy=$env:http_proxy\"; echo \"https_proxy=$env:https_proxy\"; echo \"NO_PROXY=$env:NO_PROXY\")",
+      "PowerShell(New-Item *)"
+    ]
+  }
+}

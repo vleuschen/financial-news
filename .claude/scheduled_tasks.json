@@ -1,0 +1,24 @@
+{
+  "tasks": [
+    {
+      "id": "20b04ea1",
+      "cron": "3 8 * * *",
+      "prompt": "Run the news-aggregator-skill to generate a comprehensive morning news briefing. Use the following sources to cover all categories:\n1. Silicon Valley tech: hackernews, producthunt\n2. China VC/startups: 36kr, tencent\n3. Open source community: github\n4. Financial markets: wallstreetcn\n5. International news: international (bbc, guardian, aljazeera, france24, reuters)\n6. Top AI podcasts/hardcore tweets: podcasts (lexfridman, latentspace), ai_newsletters\n\nFollow the universal workflow in SKILL.md:\nStep 1: python3 scripts/fetch_news.py --source hackernews,producthunt,36kr,tencent,github,wallstreetcn,international,podcasts,ai_newsletters --limit 10 --deep --no-save\nStep 2: Generate a beautiful Markdown report following the Unified Report Template\nStep 3: Save to reports/YYYY-MM-DD/morning_briefing.md and display\n\nTranslate everything to Simplified Chinese. Provide Deep Dive insights. Save the final report.",
+      "createdAt": 1781397939598,
+      "recurring": true,
+      "createdBySessionId": "b8a0b039-65c5-4cbc-a3d6-70f9aa7294f0",
+      "createdByPid": 15872,
+      "createdByProcStart": "639170226478825310"
+    },
+    {
+      "id": "67ed4b5e",
+      "cron": "3 20 * * *",
+      "prompt": "Run the news-aggregator-skill to generate a comprehensive evening news briefing. Use the following sources to cover all categories:\n1. Silicon Valley tech: hackernews, producthunt\n2. China VC/startups: 36kr, tencent\n3. Open source community: github\n4. Financial markets: wallstreetcn\n5. International news: international (bbc, guardian, aljazeera, france24, reuters)\n6. Top AI podcasts/hardcore tweets: podcasts (lexfridman, latentspace), ai_newsletters\n\nFollow the universal workflow in SKILL.md:\nStep 1: python3 scripts/fetch_news.py --source hackernews,producthunt,36kr,tencent,github,wallstreetcn,international,podcasts,ai_newsletters --limit 10 --deep --no-save\nStep 2: Generate a beautiful Markdown report following the Unified Report Template\nStep 3: Save to reports/YYYY-MM-DD/evening_briefing.md and display\n\nTranslate everything to Simplified Chinese. Provide Deep Dive insights. Save the final report.",
+      "createdAt": 1781397941268,
+      "recurring": true,
+      "createdBySessionId": "b8a0b039-65c5-4cbc-a3d6-70f9aa7294f0",
+      "createdByPid": 15872,
+      "createdByProcStart": "639170226478825310"
+    }
+  ]
+}

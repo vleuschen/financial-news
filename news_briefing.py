@@ -640,28 +640,32 @@ PROFILES = {
     "general": {
         "emoji": "🌅", "name": "综合早报",
         "sources": [
-            (fetch_hackernews, 6, None), (fetch_36kr, 5, None),
-            (fetch_github, 3, None), (fetch_wallstreetcn, 3, None),
-            (fetch_producthunt, 2, None), (fetch_weibo, 2, None),
+            (fetch_36kr, 8, None),
+            (fetch_wallstreetcn, 5, None),
+            (fetch_hackernews, 7, "AI,LLM,GPT,Claude,Model,Robot,Tech,Apple,Google,Meta,Tesla,SpaceX"),
+            (fetch_weibo, 3, None),
+            (fetch_ai_newsletters, 4, None),
+            (fetch_aihot, 3, None),
         ],
     },
     "finance": {
         "emoji": "💰", "name": "财经早报",
         "sources": [
             (fetch_wallstreetcn, 8, None),
-            (fetch_36kr, 5, "财报,营收,上市,IPO,投资,基金,股市"),
-            (fetch_tencent, 3, "财经,股票,基金,市场,经济"),
-            (fetch_hackernews, 3, "Economy,Inflation,Fed,Stock,Finance,Bank,Market"),
+            (fetch_36kr, 6, "财报,营收,上市,IPO,投资,基金,股市,经济"),
+            (fetch_tencent, 4, "财经,股票,基金,市场,经济,金融"),
+            (fetch_hackernews, 4, "Economy,Inflation,Fed,Stock,Finance,Bank,Market,Invest"),
         ],
     },
     "tech": {
         "emoji": "🤖", "name": "科技早报",
         "sources": [
-            (fetch_hackernews, 5, "AI,LLM,GPT,Claude,Model,Robot,Startup,Tech,Apple,Google,Meta,Microsoft"),
-            (fetch_github, 4, None), (fetch_producthunt, 3, "Developer Tools,Coding,API,AI,Tech"),
-            (fetch_36kr, 2, "融资,首发,独角兽,创投,科技"),
-            (fetch_ai_newsletters, 4, None), (fetch_aihot, 3, None),
-            (fetch_tldr, 3, None), (fetch_import_ai, 1, None),
+            (fetch_hackernews, 6, "AI,LLM,GPT,Claude,Model,Robot,Tech,Apple,Google,Meta,Microsoft,Chip,Startup"),
+            (fetch_36kr, 4, "融资,首发,独角兽,创投,科技,AI,人工智能"),
+            (fetch_ai_newsletters, 5, None),
+            (fetch_aihot, 4, None),
+            (fetch_tldr, 3, None),
+            (fetch_import_ai, 2, None),
         ],
     },
 }
@@ -670,23 +674,47 @@ PROFILES = {
 # ── Pipeline ───────────────────────────────────────────────────────────────
 
 
-def _fetch_content(items):
-    """Fetch URL content for HN items without summaries."""
-    to_fetch = [
-        it for it in items
-        if it.get("source") == "Hacker News"
-        and not it.get("summary")
-        and it.get("url") and "item?id=" not in it["url"]
+def _clean_summary_text(text):
+    """清洗 RSS 摘要中的常见导航/订阅垃圾文字。"""
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    # 去掉常见的 RSS 废话前缀
+    prefixes = [
+        r'^Skip to main content[\.\:\s]*',
+        r'^Search[\.\:\s]*',
+        r'^Sign in[\.\:\s]*',
+        r'^Sign up[\.\:\s]*',
+        r'^Subscribe[\.\:\s]*',
+        r'^Menu[\.\:\s]*',
+        r'^(Home|About|Log in|Login|Register)[\.\:\s]*',
+        r'^Cookie policy[\.\:\s]*',
+        r'^Privacy policy[\.\:\s]*',
+        r'^Share this[\.\:\s]*',
+        r'^Save this story[\.\:\s]*',
+        r'^Comment Loader[\.\:\s]*',
+        r'^Listen to this article[\.\:\s]*',
+        r'^Follow us[\.\:\s]*',
+        r'^Read more[\.\:\s]*',
     ]
-    if not to_fetch:
-        return
+    for p in prefixes:
+        text = re.sub(p, '', text, flags=re.IGNORECASE).strip()
 
-    def _f(it):
-        c = fetch_url(it["url"], 1000)
-        if c and not c.startswith("%PDF"):
-            it["fetched_content"] = c
-    with concurrent.futures.ThreadPoolExecutor(6) as ex:
-        ex.map(_f, to_fetch)
+    # 去掉常见的尾部废话
+    suffixes = [
+        r'\.\s*Subscribe to.*$',
+        r'\.\s*Sign up for.*$',
+        r'\.\s*Read more.*$',
+        r'\.\s*Click to.*$',
+        r'\s*—.*(Subscribe|Sign up).*$',
+        r'\s*\|.*(Subscribe|Sign up).*$',
+        r'\s*All rights reserved.*$',
+        r'\s*Terms of Service.*$',
+    ]
+    for s in suffixes:
+        text = re.sub(s, '.', text, flags=re.IGNORECASE).strip()
+
+    return text
 
 
 def _smart_summary(text, target_len=60):
@@ -758,50 +786,59 @@ def _strip_hn_prefix(title):
 
 
 def _make_news_line(it):
-    """为一条新闻生成一句完整的中文描述（30-50字），如模板格式。
+    """为一条新闻生成一句完整的中文描述（30-50字）。
 
-    策略：中文源直接用标题；英文源翻译标题+摘要合并为一句。
+    核心策略：
+    - 中文源 → 标题就是新闻
+    - AIHOT → 已有中文摘要
+    - AI 简讯 → RSS 描述翻译后取第一句
+    - Hacker News → 只翻标题（HN 标题本身就很完整）
+    - 其他 → 翻标题，不要了也不抓网页
     """
     title = it.get("title", "")
     src = it.get("source", "")
-    raw = it.get("summary") or it.get("fetched_content", "")
-    title = _strip_hn_prefix(title)
+    raw = it.get("summary", "") or ""
 
-    # ── 中文快讯源：标题就是完整新闻句 ──
+    # 去掉 HN 前缀
+    if src == "Hacker News":
+        title = re.sub(r'^(Ask|Show|Tell|Rate) HN\s*:\s*', '', title, flags=re.IGNORECASE).strip()
+
+    # ── 中文源 → 标题就是完整新闻 ──
     if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
         return title
 
-    # ── 已有中文描述（AIHOT等） ──
-    if has_chinese(raw) and not _is_garbage(raw):
-        s = _smart_summary(raw)
-        if s:
-            return s
+    # ── AIHOT → 中文摘要 ──
+    if src == "AIHOT" and has_chinese(raw):
+        return _smart_summary(raw)
 
-    # ── 英文内容 → 翻译成中文新闻句 ──
-    # 先翻译标题
-    title_cn = translate_to_cn(title) if not has_chinese(title) else title
+    # ── Hacker News → 只翻译标题 ──
+    if src == "Hacker News":
+        cn = translate_to_cn(title)
+        return cn if cn and cn != title and len(cn) >= 10 else ""
 
-    # 如果有英文描述，翻译后提取第一句作为补充
-    if raw and not _is_garbage(raw) and len(raw) > 20:
-        cn = translate_to_cn(raw[:600])
-        if cn and cn != raw[:600]:
-            # 清理导航前缀
-            cn = re.sub(
-                r'^(Skip to main content|Search|Sign in|Sign up|Subscribe|'
-                r'Menu|Home|About|Log in|Login|Register)\s*[\.\:\s]*',
-                '', cn, flags=re.IGNORECASE
-            ).strip()
-            detail = _smart_summary(cn)
-            if detail and len(detail) >= 15:
-                # 合并标题+细节为一句
-                merged = f"{title_cn}：{detail}"
-                return merged[:100]
+    # ── AI 简讯（Interconnects、One Useful Thing 等） → 翻译描述 ──
+    if src in ("Interconnects", "One Useful Thing", "ChinAI", "Memia",
+               "AI to ROI", "KDnuggets", "TLDR AI", "Import AI"):
+        # 先尝试用 description
+        if raw and not _is_garbage(raw):
+            raw = _clean_summary_text(raw)
+            cn = translate_to_cn(raw[:500])
+            if cn and cn != raw[:500]:
+                s = _smart_summary(cn)
+                if s and len(s) >= 15:
+                    return s
+        # 兜底：翻译标题
+        cn = translate_to_cn(title)
+        if cn and cn != title and len(cn) >= 10:
+            return cn
+        return ""
 
-    # 兜底：翻译后的标题
-    if title_cn and title_cn != title and len(title_cn) >= 10:
-        return title_cn
-
-    return title_cn if len(title_cn) > 8 else ""
+    # ── 其他 → 翻译标题 ──
+    if not has_chinese(title):
+        cn = translate_to_cn(title)
+        if cn and cn != title and len(cn) >= 10:
+            return cn
+    return title if len(title) >= 10 else ""
 
 
 def run_profile(key, max_items=15):
@@ -824,10 +861,7 @@ def run_profile(key, max_items=15):
     for it in all_items:
         it["title"] = clean_title(it["title"], it.get("source", ""))
 
-    # 补充抓取内容（只对 HN 有效）
-    _fetch_content(all_items)
-
-    # 翻译标题 + 生成一句完整中文新闻
+    # 生成一句完整中文新闻
     for it in all_items:
         title = it["title"]
         title_clean = _strip_hn_prefix(title)

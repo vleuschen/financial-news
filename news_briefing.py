@@ -155,16 +155,23 @@ def translate_to_cn(text):
         return text
     t = text.strip()
     # 纯单个英文词（无空格无中文）→ 大概率是专有名词，不翻译
-    if ' ' not in t and not has_chinese(t) and t.isascii() and len(t) > 1:
+    if ' ' not in t and t.isascii() and len(t) > 1:
         return t
 
-    # 保护专有名词：先用占位符替换
-    keep_map = {}
+    # 保护专有名词：用 __K0__ __K1__ 等安全占位符，URL编码和翻译都不会破坏
+    keep_map = {}  # placeholder -> original
+    reverse_map = {}  # original -> placeholder
     for m in _KEEP_EN.finditer(t):
         orig = m.group(0)
-        placeholder = f"\x00KEEP_{len(keep_map)}\x00"
+        if orig in reverse_map:
+            continue  # 已经替换过
+        placeholder = f"__K{len(keep_map)}__"
         keep_map[placeholder] = orig
-        t = t.replace(orig, placeholder, 1)
+        reverse_map[orig] = placeholder
+
+    # 替换原文中的专有名词
+    for orig, placeholder in sorted(reverse_map.items(), key=lambda x: -len(x[0])):
+        t = t.replace(orig, placeholder)
 
     # 调用 Google Translate
     for attempt in range(3):
@@ -177,7 +184,10 @@ def translate_to_cn(text):
             result = r.json()
             translated = "".join(p[0] for p in result[0] if p[0])
             if translated:
-                return _restore_keep_words(translated, keep_map)
+                # 恢复专有名词
+                for placeholder, orig in keep_map.items():
+                    translated = translated.replace(placeholder, orig)
+                return translated
             break
         except Exception as e:
             if attempt < 2:
@@ -235,66 +245,70 @@ def fetch_url(url, max_chars=2000):
         return ""
 
 
-def make_summary(item):
-    """为单条新闻生成 30-50 字中文摘要。"""
-    title = item.get("title", "")
-    source = item.get("source", "")
-
-    # 1. 优先用 RSS 已有的 summary（已经翻译好的）
-    summary = item.get("summary", "") or ""
-    if not summary:
-        summary = item.get("fetched_content", "") or ""
-
-    # 2. 中文标题本身就很完整 → 直接提炼
-    if has_chinese(title):
-        t = clean_title(title, source)
-        # 36氪/华尔街见闻的快讯标题本身就是一句话新闻
-        if source in ("36氪", "华尔街见闻", "腾讯新闻"):
-            if len(t) > 15:
-                return t  # 标题本身就是新闻内容
-        if summary:
-            s = summary[:200]
-            s = re.sub(r'\s+', ' ', s).strip()
-            # 取第一句
-            for sep in ["。", "！", "？", "；"]:
-                idx = s.find(sep)
-                if 10 < idx < 200:
-                    return s[:idx + 1]
-            return s[:80] + ("…" if len(s) > 80 else "")
-    else:
-        # 英文标题：用翻译后的 summary
-        if summary:
-            # 翻译 summary
-            cn = translate_to_cn(summary[:500])
-            cn = re.sub(r'\s+', ' ', cn).strip()
-            for sep in ["。", "！", "？", "；"]:
-                idx = cn.find(sep)
-                if 10 < idx < 200:
-                    return cn[:idx + 1]
-            return cn[:80] + ("…" if len(cn) > 80 else "")
-    return ""
-
-
 # ── Filters ────────────────────────────────────────────────────────────────
 
 _BAD_TITLE_RE = re.compile(
     r"^(登录|注册|账号|设置|我的关注|我的收藏|退出|首页|"
     r"搜索|关于我们|联系我们|广告|免责|协议|隐私|"
-    r"Copyright|All rights reserved|This page|404|302|Redirect)",
+    r"Copyright|All rights reserved|This page|404|302|Redirect|"
+    r"Subscribe|Sign in|Sign up|Skip to|Comment|Loader|Save Story)",
+    re.IGNORECASE
+)
+
+# 不是新闻的内容模式
+_NOT_NEWS_RE = re.compile(
+    r"^(%PDF-|%PNG|GIF8|PK\x03\x04|MZ\x90)",  # 二进制文件头
+    re.IGNORECASE
+)
+
+# GitHub 仓库描述不是新闻——纯开源项目列表
+_GITHUB_DESC_RE = re.compile(
+    r"^(A collection of|Collection of|An alternative to|"
+    r"An open.source|Open.source|An opinionated|"
+    r"List of|A list of|The best|Awesome )",
     re.IGNORECASE
 )
 
 
 def is_good_item(item):
-    """过滤垃圾条目：导航文字、太短、无意义。"""
+    """过滤垃圾条目：导航文字、太短、无意义、二进制内容。"""
     title = item.get("title", "").strip()
     if not title or len(title) < 5:
         return False
     if _BAD_TITLE_RE.match(title):
         return False
-    # 纯链接或者纯数字
     if re.match(r'^https?://', title):
         return False
+    if _NOT_NEWS_RE.match(title):
+        return False
+
+    src = item.get("source", "")
+
+    # GitHub Trending 的仓库描述不算新闻，必须有实质内容
+    if "GitHub" in src:
+        # 纯仓库描述：如 "iptv-org/iptv — Collection of ..."
+        if " — " in title:
+            parts = title.split(" — ", 1)
+            repo_name = parts[0].strip()
+            desc = parts[1].strip()
+            # 如果描述是"Collection of...", "An alternative to..." 这类模板 → 过滤
+            if _GITHUB_DESC_RE.match(desc):
+                return False
+            # 只有仓库名没有实际新闻内容
+            if desc and " " in desc and len(desc) < 15:
+                return False
+        # 纯仓库名（无描述）→ 过滤
+        elif "/" in title and len(title) < 30:
+            return False
+
+    # 产品名单独出现（无上下文）→ Product Hunt 的纯产品名
+    if "Product Hunt" in src and " " not in title and len(title) < 20:
+        return False
+
+    # 中文标题太短而且没有标点说明
+    if has_chinese(title) and len(title) < 8 and "，" not in title and "：" not in title:
+        return False
+
     return True
 
 
@@ -355,6 +369,9 @@ def parse_rss(content, src, limit=10):
             title = tag.get_text(strip=True)
             if not title:
                 continue
+            title = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', title).strip()
+            if not title:
+                continue
             link = ""
             lt = entry.find("link")
             if lt:
@@ -372,6 +389,7 @@ def parse_rss(content, src, limit=10):
             summary = ""
             if desc:
                 raw = desc.get_text()
+                raw = re.sub(r'^\s*<!\[CDATA\[|\]\]>\s*$', '', raw).strip()
                 summary = BeautifulSoup(raw, "html.parser").get_text(separator=" ", strip=True)[:800]
             items.append({"source": src, "title": title, "url": link,
                           "time": ts, "summary": summary})
@@ -652,6 +670,54 @@ PROFILES = {
 # ── Pipeline ───────────────────────────────────────────────────────────────
 
 
+def _fetch_content(items):
+    """Fetch URL content for HN items without summaries."""
+    to_fetch = [
+        it for it in items
+        if it.get("source") == "Hacker News"
+        and not it.get("summary")
+        and it.get("url") and "item?id=" not in it["url"]
+    ]
+    if not to_fetch:
+        return
+
+    def _f(it):
+        c = fetch_url(it["url"], 1000)
+        if c and not c.startswith("%PDF"):
+            it["fetched_content"] = c
+    with concurrent.futures.ThreadPoolExecutor(6) as ex:
+        ex.map(_f, to_fetch)
+
+
+def _first_sentence(text):
+    """取第一句有意义的句子。"""
+    if not text:
+        return ""
+    text = re.sub(r'\s+', ' ', text).strip()
+    for sep in ["。", "！", "？", "；"]:
+        idx = text.find(sep)
+        if 10 < idx < 250:
+            return text[:idx + 1]
+    for sep in [". ", "! ", "? "]:
+        idx = text.find(sep)
+        if 10 < idx < 250:
+            return text[:idx + 1]
+    return text[:120] + ("…" if len(text) > 120 else "")
+
+
+def _is_garbage(text):
+    """检测是否为PDF/二进制/导航等垃圾内容。"""
+    if not text:
+        return True
+    if text.startswith("%PDF") or text.startswith("%PNG"):
+        return True
+    nav = ["Search", "Sign in", "Sign up", "Subscribe",
+           "Skip to main content", "Cookie policy",
+           "All rights reserved", "Terms of Service"]
+    count = sum(1 for m in nav if m.lower() in text.lower())
+    return count >= 3
+
+
 def run_profile(key, max_items=15):
     cfg = PROFILES[key]
     all_items = []
@@ -669,65 +735,44 @@ def run_profile(key, max_items=15):
     all_items = dedup(all_items)
     print(f"    → After filter+dedup: {len(all_items)}", file=sys.stderr)
 
-    # 清洗标题
     for it in all_items:
-        src = it.get("source", "")
-        it["title"] = clean_title(it["title"], src)
+        it["title"] = clean_title(it["title"], it.get("source", ""))
 
-    # Fetch missing content (只对没有 summary 的英文文章)
-    need_fetch = [it for it in all_items if not it.get("summary") and not src_in(["36氪", "华尔街见闻", "腾讯新闻", "微博热搜"], it.get("source", ""))]
-    if 0:
-        pass  # disable content fetch for speed — rely on RSS summaries instead
-    # Actually let's keep it light: only fetch for HN items without summary
-    hn_items = [it for it in all_items if it.get("source") == "Hacker News" and not it.get("summary") and it.get("url") and "item?id=" not in it.get("url", "")]
-    if hn_items:
-        def _f(it):
-            c = fetch_url(it["url"], 1000)
-            if c:
-                it["fetched_content"] = c
-        with concurrent.futures.ThreadPoolExecutor(6) as ex:
-            ex.map(_f, hn_items)
+    _fetch_content(all_items)
 
-    # 翻译 & 生成摘要
     for it in all_items:
         title = it["title"]
         src = it.get("source", "")
-        summary_src = it.get("summary") or it.get("fetched_content", "")
+        raw = it.get("summary") or it.get("fetched_content", "")
 
-        # 翻译标题
         if has_chinese(title):
             it["title_cn"] = title
         else:
             it["title_cn"] = translate_to_cn(title)
 
-        # 生成摘要
+        # 中文快讯源：标题就是完整新闻
         if src in ("36氪", "华尔街见闻", "腾讯新闻", "微博热搜"):
-            it["summary_cn"] = title  # 标题就是完整新闻
-        elif has_chinese(summary_src):
-            s = summary_src[:200]
-            s = re.sub(r'\s+', ' ', s).strip()
-            for sep in ["。", "！", "？", "；"]:
-                idx = s.find(sep)
-                if 10 < idx < 200:
-                    s = s[:idx + 1]
-                    break
-            it["summary_cn"] = s[:120]
-        elif summary_src:
-            it["summary_cn"] = translate_to_cn(summary_src[:300])
-            for sep in ["。", "！", "？", "；"]:
-                idx = it["summary_cn"].find(sep)
-                if 10 < idx < 200:
-                    it["summary_cn"] = it["summary_cn"][:idx + 1]
-                    break
-            it["summary_cn"] = it["summary_cn"][:120]
+            it["summary_cn"] = title
+            continue
+
+        if _is_garbage(raw):
+            it["summary_cn"] = ""
+            continue
+
+        if has_chinese(raw):
+            it["summary_cn"] = _first_sentence(raw[:400])
+        elif raw:
+            cn = translate_to_cn(raw[:600])
+            it["summary_cn"] = _first_sentence(cn) if cn and cn != raw[:600] else ""
         else:
             it["summary_cn"] = ""
 
-    return cfg, all_items[:max_items]
-
-
-def src_in(sources, src):
-    return any(s in src for s in sources)
+    # 过滤无摘要的
+    final = [it for it in all_items
+             if it.get("summary_cn") and len(it["summary_cn"]) >= 5
+             and not _is_garbage(it["summary_cn"])]
+    print(f"    → After summary quality filter: {len(final)}", file=sys.stderr)
+    return cfg, final[:max_items]
 
 
 # ── Format ─────────────────────────────────────────────────────────────────
